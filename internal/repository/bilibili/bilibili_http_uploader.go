@@ -37,7 +37,14 @@ func NewHTTPUploader(baseURL, cookiesFromBrowser, cookiesFile string) Uploader {
 		cookiesFromBrowser: cookiesFromBrowser,
 		cookiesFile:        cookiesFile,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Minute, // 视频上传可能需要较长时间
+			Timeout: 0, // 不设置全局超时，使用 context 控制超时
+			Transport: &http.Transport{
+				MaxIdleConns:        10,
+				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  false,
+				DisableKeepAlives:   false,
+				MaxIdleConnsPerHost: 5,
+			},
 		},
 	}
 }
@@ -62,6 +69,19 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		return nil, fmt.Errorf("提取 CSRF token 失败: %w", err)
 	}
 
+	// 先访问上传页面，确保会话有效并获取上传权限
+	// 这一步很重要，因为 B站可能需要先访问页面才能获得上传权限
+	if err := u.visitUploadPage(ctx); err != nil {
+		logger.Warn().Err(err).Msg("访问上传页面失败，继续尝试上传")
+		// 不返回错误，继续尝试上传
+	}
+
+	// 0. 在开始上传前检查所需文件是否存在
+	videoDir := filepath.Dir(videoPath)
+	if err := u.validateRequiredFiles(videoPath, subtitlePaths, videoDir); err != nil {
+		return nil, fmt.Errorf("文件检查失败: %w", err)
+	}
+
 	// 1. 上传视频
 	filename, err := u.uploadVideo(ctx, videoPath)
 	if err != nil {
@@ -74,7 +94,12 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 	if len(subtitlePaths) > 0 {
 		subtitleURL, err = u.uploadSubtitles(ctx, subtitlePaths)
 		if err != nil {
-			logger.Warn().Err(err).Msg("上传字幕失败，继续上传其他内容")
+			// 字幕合法性检查失败或上传失败，记录详细错误但继续上传
+			// 用户可能需要手动处理不合法的字幕内容
+			logger.Warn().
+				Err(err).
+				Strs("subtitle_paths", subtitlePaths).
+				Msg("上传字幕失败，继续上传其他内容（视频和封面图）。如需字幕，请手动检查并修复字幕文件中的不合法内容后重新上传")
 		} else {
 			logger.Info().Str("subtitle_url", subtitleURL).Msg("字幕上传完成")
 		}
@@ -82,7 +107,17 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 
 	// 3. 上传封面图
 	var coverURL string
+	// 优先查找 cover.jpg，如果没有则查找 thumbnail.jpg
 	coverPath := filepath.Join(filepath.Dir(videoPath), "cover.jpg")
+	if _, err := os.Stat(coverPath); err != nil {
+		// 如果 cover.jpg 不存在，尝试使用 thumbnail.jpg
+		thumbnailPath := filepath.Join(filepath.Dir(videoPath), "thumbnail.jpg")
+		if _, err := os.Stat(thumbnailPath); err == nil {
+			coverPath = thumbnailPath
+			logger.Debug().Str("path", thumbnailPath).Msg("使用 thumbnail.jpg 作为封面图")
+		}
+	}
+
 	if _, err := os.Stat(coverPath); err == nil {
 		coverURL, err = u.uploadCover(ctx, coverPath)
 		if err != nil {
@@ -90,10 +125,21 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		} else {
 			logger.Info().Str("cover_url", coverURL).Msg("封面图上传完成")
 		}
+	} else {
+		logger.Debug().Msg("未找到封面图文件（cover.jpg 或 thumbnail.jpg），将使用默认封面")
 	}
 
 	// 4. 发布视频
-	aid, err := u.publishVideo(ctx, filename, videoTitle, coverURL, subtitleURL)
+	// 注意：发布时 filename 不应该包含 .mp4 后缀
+	publishFilename := filename
+	if strings.HasSuffix(publishFilename, ".mp4") {
+		publishFilename = strings.TrimSuffix(publishFilename, ".mp4")
+		logger.Debug().
+			Str("original", filename).
+			Str("publish", publishFilename).
+			Msg("移除 .mp4 后缀用于发布")
+	}
+	aid, err := u.publishVideo(ctx, publishFilename, videoTitle, coverURL, subtitleURL)
 	if err != nil {
 		return nil, fmt.Errorf("发布视频失败: %w", err)
 	}
@@ -101,6 +147,13 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 	result.Success = true
 	result.AID = aid
 	result.VideoID = aid
+
+	logger.Info().
+		Str("bilibili_aid", aid).
+		Str("filename", filename).
+		Str("title", videoTitle).
+		Msg("视频发布成功，上传流程完成")
+
 	return result, nil
 }
 
@@ -128,6 +181,56 @@ func (u *httpUploader) CheckLoginStatus(ctx context.Context) (bool, error) {
 
 	// 如果返回 200 且能访问上传页面，说明已登录
 	return resp.StatusCode == 200, nil
+}
+
+// visitUploadPage 访问上传页面，确保会话有效并获取上传权限
+func (u *httpUploader) visitUploadPage(ctx context.Context) error {
+	// 访问 studio.bilibili.tv 的上传页面
+	uploadPageURL := "https://studio.bilibili.tv/archive/new"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", uploadPageURL, nil)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	u.setCookies(req)
+	u.setHeaders(req)
+
+	// 设置正确的 Referer 和 Origin
+	req.Header.Set("Referer", "https://studio.bilibili.tv/")
+	req.Header.Set("Origin", "https://studio.bilibili.tv")
+
+	logger.Debug().Str("url", uploadPageURL).Msg("访问上传页面以获取上传权限")
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("访问上传页面失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		logger.Warn().
+			Int("status_code", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("访问上传页面返回非200状态码")
+		return fmt.Errorf("访问上传页面失败: HTTP %d", resp.StatusCode)
+	}
+
+	logger.Debug().Msg("成功访问上传页面，已获取上传权限")
+	return nil
+}
+
+// maskCookieHeader 掩码 Cookie header 中的敏感信息（用于日志）
+func maskCookieHeader(cookieHeader string) string {
+	if cookieHeader == "" {
+		return ""
+	}
+	// 简单处理：只显示前20个字符和后10个字符
+	if len(cookieHeader) > 30 {
+		return cookieHeader[:20] + "..." + cookieHeader[len(cookieHeader)-10:]
+	}
+	return cookieHeader
 }
 
 // loadCookies 加载 cookies 文件
@@ -169,6 +272,20 @@ func (u *httpUploader) extractCSRFToken() error {
 
 // setCookies 设置请求的 cookies
 func (u *httpUploader) setCookies(req *http.Request) {
+	// 对于跨域请求（如上传到 OSS），需要手动构建 Cookie header
+	// 因为 req.AddCookie 可能不会为不同域名的请求设置 cookies
+	var cookieParts []string
+	for _, cookie := range u.cookies {
+		// 对于 bilibili 相关的域名，都应该设置 cookies
+		// 特别是上传到 upos-cs-upcdntxa.bilivideo.com 时，需要 bilibili.tv 的 cookies
+		cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
+	}
+
+	if len(cookieParts) > 0 {
+		req.Header.Set("Cookie", strings.Join(cookieParts, "; "))
+	}
+
+	// 同时也尝试使用 AddCookie（作为备用，虽然可能不会生效）
 	for _, cookie := range u.cookies {
 		req.AddCookie(&http.Cookie{
 			Name:   cookie.Name,
@@ -181,9 +298,29 @@ func (u *httpUploader) setCookies(req *http.Request) {
 
 // setHeaders 设置请求头
 func (u *httpUploader) setHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", fmt.Sprintf("%s/archive/new", u.baseURL))
-	req.Header.Set("Origin", u.baseURL)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
+
+	// 根据请求 URL 设置正确的 Referer 和 Origin
+	requestURL := req.URL.String()
+	if strings.Contains(requestURL, "upos-cs-upcdntxa.bilivideo.com") {
+		// 上传到 OSS 的请求，使用 studio.bilibili.tv 作为 Referer（注意：是根路径，不是 /archive/new）
+		req.Header.Set("Referer", "https://studio.bilibili.tv/")
+		req.Header.Set("Origin", "https://studio.bilibili.tv")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	} else if strings.Contains(requestURL, "api.bilibili.tv") {
+		// API 请求，使用 studio.bilibili.tv（注意：Referer 是根路径，不是 /archive/new）
+		req.Header.Set("Referer", "https://studio.bilibili.tv/")
+		req.Header.Set("Origin", "https://studio.bilibili.tv")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	} else {
+		// 其他请求，使用配置的 baseURL
+		req.Header.Set("Referer", fmt.Sprintf("%s/archive/new", u.baseURL))
+		req.Header.Set("Origin", u.baseURL)
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	}
 }
 
 // buildAPIURL 构建 API URL（包含必需的 query 参数）
@@ -232,6 +369,18 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 		Int64("size", fileSize).
 		Msg("开始上传视频")
 
+	// 0. 调用 preupload API 获取上传配置和认证信息
+	uposAuth, actualFilename, err := u.getUposAuth(ctx, filename, fileSize)
+	if err != nil {
+		logger.Warn().Err(err).Msg("获取上传认证信息失败，尝试不使用 X-Upos-Auth")
+		// 不返回错误，继续尝试上传，使用原始文件名
+		actualFilename = filename
+	} else if actualFilename != "" {
+		// 使用 preupload 返回的实际文件名
+		filename = actualFilename
+		logger.Debug().Str("actual_filename", filename).Msg("使用 preupload 返回的文件名")
+	}
+
 	// 1. 初始化上传
 	uploadURL := fmt.Sprintf("https://upos-cs-upcdntxa.bilivideo.com/iupever/%s?uploads&output=json", filename)
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, nil)
@@ -239,21 +388,93 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 		return "", err
 	}
 
+	// 设置 cookies 和 headers（初始化上传也需要认证）
+	u.setCookies(req)
 	u.setHeaders(req)
+
+	// 上传到 OSS 的请求需要额外的 headers
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	// 设置 X-Upos-Auth header（如果获取到了）
+	if uposAuth != "" {
+		req.Header.Set("X-Upos-Auth", uposAuth)
+		logger.Debug().Str("x_upos_auth", uposAuth[:50]+"...").Msg("已设置 X-Upos-Auth header")
+	} else {
+		logger.Warn().Msg("未设置 X-Upos-Auth header，可能影响上传")
+	}
+
+	// 记录请求信息以便调试（使用 Info 级别，确保能看到）
+	logger.Info().
+		Str("url", uploadURL).
+		Str("referer", req.Header.Get("Referer")).
+		Str("origin", req.Header.Get("Origin")).
+		Str("cookie_header", maskCookieHeader(req.Header.Get("Cookie"))).
+		Str("x_upos_auth", maskCookieHeader(uposAuth)).
+		Int("cookie_count", len(u.cookies)).
+		Msg("初始化上传请求")
+
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("初始化上传失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var initResp struct {
-		UploadID string `json:"uploadId"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&initResp); err != nil {
-		return "", fmt.Errorf("解析初始化响应失败: %w", err)
+	// 读取响应体以便调试
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取初始化响应失败: %w", err)
 	}
 
-	uploadID := initResp.UploadID
+	// 检查状态码
+	if resp.StatusCode != 200 {
+		logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("初始化上传返回非200状态码")
+		return "", fmt.Errorf("初始化上传失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// 解析响应
+	// 解析响应（初始化上传 API 直接返回数据，格式：{"OK":1,"bucket":"iupever","key":"/filename.mp4","upload_id":"..."}）
+	var initResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &initResp); err != nil {
+		logger.Error().
+			Err(err).
+			Str("response", string(bodyBytes)).
+			Msg("解析初始化响应失败")
+		return "", fmt.Errorf("解析初始化响应失败: %w, 响应: %s", err, string(bodyBytes))
+	}
+
+	// 检查 OK 字段
+	if ok, _ := initResp["OK"].(float64); ok != 1 {
+		logger.Error().
+			Str("response", string(bodyBytes)).
+			Msg("初始化上传返回 OK != 1")
+		return "", fmt.Errorf("初始化上传失败: OK=%v, 响应: %s", ok, string(bodyBytes))
+	}
+
+	// 获取 upload_id（注意：是下划线，不是驼峰）
+	uploadID := ""
+	if id, ok := initResp["upload_id"].(string); ok {
+		uploadID = id
+	} else if id, ok := initResp["uploadId"].(string); ok {
+		// 兼容驼峰格式
+		uploadID = id
+	}
+
+	if uploadID == "" {
+		logger.Error().
+			Str("response", string(bodyBytes)).
+			Msg("初始化响应中 upload_id 为空")
+		return "", fmt.Errorf("初始化响应中 upload_id 为空，响应: %s", string(bodyBytes))
+	}
+
 	logger.Info().Str("upload_id", uploadID).Msg("已初始化上传")
 
 	// 2. 分块上传
@@ -281,11 +502,65 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 			return "", fmt.Errorf("创建分块上传请求失败: %w", err)
 		}
 
+		// 设置 headers（分块上传需要 X-Upos-Auth 和正确的 headers）
 		u.setHeaders(req)
-		resp, err := u.httpClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("上传分块 %d 失败: %w", partNumber, err)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(chunkData)))
+
+		// 设置 X-Upos-Auth header（每个分块上传都需要）
+		if uposAuth != "" {
+			req.Header.Set("X-Upos-Auth", uposAuth)
+		} else {
+			logger.Warn().Int("chunk", partNumber).Msg("分块上传时未设置 X-Upos-Auth header")
 		}
+
+		// 添加重试机制（最多重试3次）
+		var resp *http.Response
+		maxRetries := 3
+		for retry := 0; retry < maxRetries; retry++ {
+			resp, err = u.httpClient.Do(req)
+			if err == nil {
+				break
+			}
+
+			if retry < maxRetries-1 {
+				waitTime := time.Duration(retry+1) * time.Second
+				logger.Warn().
+					Int("chunk", partNumber).
+					Int("retry", retry+1).
+					Dur("wait", waitTime).
+					Err(err).
+					Msg("分块上传失败，重试中")
+				time.Sleep(waitTime)
+
+				// 重新创建请求（因为 body 已经被读取）
+				req, _ = http.NewRequestWithContext(ctx, "PUT", chunkURL, bytes.NewReader(chunkData))
+				u.setHeaders(req)
+				req.Header.Set("Content-Type", "application/octet-stream")
+				req.Header.Set("Content-Length", fmt.Sprintf("%d", len(chunkData)))
+				// 重新设置 X-Upos-Auth
+				if uposAuth != "" {
+					req.Header.Set("X-Upos-Auth", uposAuth)
+				}
+			}
+		}
+
+		if err != nil {
+			return "", fmt.Errorf("上传分块 %d 失败（已重试 %d 次）: %w", partNumber, maxRetries, err)
+		}
+
+		// 检查响应状态码
+		if resp.StatusCode != 200 && resp.StatusCode != 204 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			logger.Error().
+				Int("chunk", partNumber).
+				Int("status_code", resp.StatusCode).
+				Str("response", string(bodyBytes)).
+				Msg("分块上传返回非200状态码")
+			return "", fmt.Errorf("上传分块 %d 失败: HTTP %d, 响应: %s", partNumber, resp.StatusCode, string(bodyBytes))
+		}
+
 		resp.Body.Close()
 
 		logger.Info().
@@ -293,6 +568,11 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 			Int("total", chunks).
 			Int64("size", end-start).
 			Msg("分块上传完成")
+
+		// 在每个分块上传之间添加短暂延迟，避免连接被关闭
+		if chunk < chunks-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
 	// 3. 完成上传
@@ -324,6 +604,102 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 	return filename, nil
 }
 
+// getUposAuth 调用 preupload API 获取上传认证信息
+func (u *httpUploader) getUposAuth(ctx context.Context, filename string, fileSize int64) (string, string, error) {
+	// 构建 preupload API URL
+	preuploadURL := u.buildAPIURL("/preupload")
+	parsedURL, err := url.Parse(preuploadURL)
+	if err != nil {
+		return "", "", fmt.Errorf("解析 preupload URL 失败: %w", err)
+	}
+
+	query := parsedURL.Query()
+	query.Set("name", filename)
+	query.Set("size", fmt.Sprintf("%d", fileSize))
+	query.Set("r", "upos")
+	query.Set("profile", "iup/bup")
+	query.Set("ssl", "0")
+	query.Set("version", "2.10.0")
+	query.Set("build", "2100000")
+	query.Set("biz", "UGC")
+	parsedURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
+	if err != nil {
+		return "", "", fmt.Errorf("创建 preupload 请求失败: %w", err)
+	}
+
+	u.setCookies(req)
+	u.setHeaders(req)
+
+	logger.Debug().Str("url", parsedURL.String()).Msg("调用 preupload API")
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("调用 preupload API 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		logger.Warn().
+			Int("status_code", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("preupload API 返回非200状态码")
+		return "", "", fmt.Errorf("preupload API 返回 HTTP %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("读取 preupload 响应失败: %w", err)
+	}
+
+	// 解析响应（preupload API 直接返回数据，没有 code/data 包装）
+	var preuploadResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &preuploadResp); err != nil {
+		logger.Warn().
+			Err(err).
+			Str("response", string(bodyBytes)).
+			Msg("解析 preupload 响应失败")
+		return "", "", fmt.Errorf("解析 preupload 响应失败: %w", err)
+	}
+
+	// 检查 OK 字段
+	if ok, _ := preuploadResp["OK"].(float64); ok != 1 {
+		logger.Warn().
+			Str("response", string(bodyBytes)).
+			Msg("preupload API 返回 OK != 1")
+		return "", "", fmt.Errorf("preupload API 返回失败: OK=%v", ok)
+	}
+
+	// 直接从根级别获取 auth 字段
+	auth := ""
+	if authVal, ok := preuploadResp["auth"].(string); ok && authVal != "" {
+		// auth 字段中可能包含转义的字符（\u0026 是 &），需要解码
+		auth = strings.ReplaceAll(authVal, "\\u0026", "&")
+		logger.Info().Str("auth", auth[:50]+"...").Msg("从 preupload 响应获取到 auth")
+	} else {
+		// 如果没有 auth 字段，记录警告
+		logger.Warn().
+			Str("response", string(bodyBytes)).
+			Msg("preupload 响应中没有 auth 字段")
+		return "", "", fmt.Errorf("preupload 响应中没有 auth 字段")
+	}
+
+	// 从 upos_uri 中提取实际文件名
+	actualFilename := filename
+	if uposURI, ok := preuploadResp["upos_uri"].(string); ok && uposURI != "" {
+		// upos_uri 格式：upos://iupever/n251209ad16g3917krfoey36fea2g002.mp4
+		// 提取文件名部分
+		if strings.HasPrefix(uposURI, "upos://iupever/") {
+			actualFilename = strings.TrimPrefix(uposURI, "upos://iupever/")
+			logger.Debug().Str("upos_uri", uposURI).Str("actual_filename", actualFilename).Msg("从 upos_uri 提取文件名")
+		}
+	}
+
+	return auth, actualFilename, nil
+}
+
 // uploadSubtitles 上传字幕
 func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []string) (string, error) {
 	if len(subtitlePaths) == 0 {
@@ -348,7 +724,27 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 	}
 
 	// 2. 进行合法性检查
+	// 如果字幕条目太多，可能需要分批检查，但先尝试一次性检查
+	// 如果失败，可以考虑跳过合法性检查或分批处理
 	checkURL := u.buildAPIURL("/intl/videoup/web2/subtitle/multi-check")
+
+	// 检查字幕条目是否为空
+	if len(entries) == 0 {
+		logger.Warn().Msg("字幕条目为空，跳过合法性检查")
+		return "", nil
+	}
+
+	logger.Info().
+		Int("entry_count", len(entries)).
+		Msg("开始字幕合法性检查")
+
+	// 如果条目太多（超过1000），记录警告
+	if len(entries) > 1000 {
+		logger.Warn().
+			Int("entry_count", len(entries)).
+			Msg("字幕条目数量较多，合法性检查可能会失败，如果失败可以尝试跳过检查")
+	}
+
 	checkData := map[string]interface{}{
 		"subtitles": entries,
 	}
@@ -358,6 +754,10 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		return "", fmt.Errorf("序列化字幕数据失败: %w", err)
 	}
 
+	logger.Debug().
+		Int("request_size", len(jsonData)).
+		Msg("字幕合法性检查请求大小")
+
 	req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", err
@@ -365,13 +765,28 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 
 	u.setCookies(req)
 	u.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("字幕合法性检查失败: %w", err)
+		return "", fmt.Errorf("字幕合法性检查失败: 请求错误: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// 读取响应体以便调试
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取字幕检查响应失败: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("字幕合法性检查返回非200状态码")
+		return "", fmt.Errorf("字幕合法性检查失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+	}
 
 	var checkResult struct {
 		Code    int    `json:"code"`
@@ -381,12 +796,38 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&checkResult); err != nil {
-		return "", fmt.Errorf("解析检查响应失败: %w", err)
+	if err := json.Unmarshal(bodyBytes, &checkResult); err != nil {
+		logger.Error().
+			Err(err).
+			Str("response", string(bodyBytes)).
+			Msg("解析字幕检查响应失败")
+		return "", fmt.Errorf("解析检查响应失败: %w, 响应: %s", err, string(bodyBytes))
 	}
 
 	if checkResult.Code != 0 {
-		return "", fmt.Errorf("字幕合法性检查失败: %s", checkResult.Message)
+		// code=-400 可能是请求格式问题或包含不合法内容
+		// 如果条目太多，可能是请求体过大；如果条目较少，可能是内容不合法
+		logger.Error().
+			Int("code", checkResult.Code).
+			Str("message", checkResult.Message).
+			Int("entry_count", len(entries)).
+			Int("request_size", len(jsonData)).
+			Str("response", string(bodyBytes)).
+			Msg("字幕合法性检查失败")
+
+		// 如果条目太多导致失败，建议跳过合法性检查
+		if len(entries) > 1000 {
+			logger.Warn().
+				Int("entry_count", len(entries)).
+				Msg("字幕条目过多可能导致合法性检查失败。如果字幕文件包含不合法内容，请手动检查并删除不合法条目后重试")
+		} else {
+			logger.Warn().
+				Int("entry_count", len(entries)).
+				Msg("字幕合法性检查失败，可能包含不合法内容。请检查字幕文件，删除不合法条目后重试")
+		}
+
+		// 返回错误，但允许调用方决定是否继续（目前会继续上传，只是没有字幕）
+		return "", fmt.Errorf("字幕合法性检查失败: code=%d, message=%s (条目数: %d, 请求大小: %d bytes). 请检查字幕文件并删除不合法内容", checkResult.Code, checkResult.Message, len(entries), len(jsonData))
 	}
 
 	if len(checkResult.Data.HitIDs) > 0 {
@@ -402,9 +843,93 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 
 	// 实际上传逻辑（需要根据实际 API 调整）
 	// 这里先返回一个 URL，实际实现可能需要调用上传 API
-	logger.Info().Str("subtitle_url", subtitleURL).Msg("字幕上传完成（模拟）")
+	logger.Info().
+		Str("subtitle_url", subtitleURL).
+		Int("entry_count", len(entries)).
+		Msg("字幕上传完成（模拟）")
 
 	return subtitleURL, nil
+}
+
+// checkSubtitleBatch 检查一批字幕条目的合法性
+func (u *httpUploader) checkSubtitleBatch(ctx context.Context, checkURL string, batch []subtitle.BilibiliSubtitleEntry) ([]string, error) {
+	checkData := map[string]interface{}{
+		"subtitles": batch,
+	}
+
+	jsonData, err := json.Marshal(checkData)
+	if err != nil {
+		return nil, fmt.Errorf("序列化字幕数据失败: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	u.setCookies(req)
+	u.setHeaders(req)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("字幕合法性检查失败: 请求错误: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取字幕检查响应失败: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("字幕合法性检查失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var checkResult struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			HitIDs []string `json:"hit_ids"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &checkResult); err != nil {
+		return nil, fmt.Errorf("解析检查响应失败: %w, 响应: %s", err, string(bodyBytes))
+	}
+
+	if checkResult.Code != 0 {
+		return nil, fmt.Errorf("字幕合法性检查失败: code=%d, message=%s", checkResult.Code, checkResult.Message)
+	}
+
+	return checkResult.Data.HitIDs, nil
+}
+
+// copyFile 复制文件
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+// min 返回两个整数中的较小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // generateHash 生成简单的哈希值（用于字幕文件名）
@@ -427,9 +952,32 @@ func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (strin
 		return "", fmt.Errorf("读取封面图失败: %w", err)
 	}
 
+	// 检测文件类型（通过文件头判断）
+	contentType := "image/jpeg" // 默认 JPEG
+	if len(imageData) >= 4 {
+		// PNG: 89 50 4E 47
+		if imageData[0] == 0x89 && imageData[1] == 0x50 && imageData[2] == 0x4E && imageData[3] == 0x47 {
+			contentType = "image/png"
+		}
+		// JPEG: FF D8 FF
+		if imageData[0] == 0xFF && imageData[1] == 0xD8 && imageData[2] == 0xFF {
+			contentType = "image/jpeg"
+		}
+		// WebP: 检查 RIFF...WEBP
+		if len(imageData) >= 12 && string(imageData[0:4]) == "RIFF" && string(imageData[8:12]) == "WEBP" {
+			contentType = "image/webp"
+		}
+	}
+
 	// 转换为 base64
 	base64Data := base64.StdEncoding.EncodeToString(imageData)
-	coverData := fmt.Sprintf("data:image/jpeg;base64,%s", base64Data)
+	coverData := fmt.Sprintf("data:%s;base64,%s", contentType, base64Data)
+
+	logger.Debug().
+		Str("cover_path", coverPath).
+		Str("content_type", contentType).
+		Int("file_size", len(imageData)).
+		Msg("准备上传封面图")
 
 	// 构建 multipart form
 	var buf bytes.Buffer
@@ -460,6 +1008,20 @@ func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (strin
 	}
 	defer resp.Body.Close()
 
+	// 读取响应体以便调试
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取封面图上传响应失败: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("封面图上传返回非200状态码")
+		return "", fmt.Errorf("上传封面图失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
+	}
+
 	var result struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -468,12 +1030,16 @@ func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (strin
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("解析封面图上传响应失败: %w", err)
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		logger.Error().
+			Err(err).
+			Str("response", string(bodyBytes)).
+			Msg("解析封面图上传响应失败")
+		return "", fmt.Errorf("解析封面图上传响应失败: %w, 响应: %s", err, string(bodyBytes))
 	}
 
 	if result.Code != 0 {
-		return "", fmt.Errorf("上传封面图失败: %s", result.Message)
+		return "", fmt.Errorf("上传封面图失败: code=%d, message=%s", result.Code, result.Message)
 	}
 
 	return result.Data.URL, nil
@@ -483,25 +1049,47 @@ func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (strin
 func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverURL, subtitleURL string) (string, error) {
 	apiURL := u.buildAPIURL("/intl/videoup/web2/add")
 
+	// 构建发布数据
 	publishData := map[string]interface{}{
-		"title":          title,
-		"cover":          coverURL,
-		"desc":           "",
-		"no_reprint":     true,
-		"filename":       filename,
-		"playlist_id":    "",
-		"subtitle_id":    nil,
-		"subtitle_url":   subtitleURL,
-		"subtitle_lang_id": 3,
-		"from_spmid":     "333.1011",
-		"copyright":      1,
-		"tag":            "",
+		"title":            title,
+		"cover":            coverURL,
+		"desc":             "",
+		"no_reprint":       true,
+		"filename":         filename,
+		"playlist_id":      "",
+		"from_spmid":       "333.1011",
+		"copyright":        1,
+		"tag":              "",
+		"subtitle_id":      nil, // 即使没有字幕，也需要设置为 null
+		"subtitle_lang_id": nil, // 即使没有字幕，也需要设置为 null
 	}
+
+	// 只有当 subtitleURL 不为空时才添加字幕相关字段
+	if subtitleURL != "" {
+		publishData["subtitle_url"] = subtitleURL
+		publishData["subtitle_lang_id"] = 3 // 有字幕时设置为 3（英语）
+	}
+
+	// 记录发布参数（用于调试）
+	logger.Info().
+		Str("filename", filename).
+		Str("title", title[:50]+"...").
+		Str("cover", coverURL).
+		Str("subtitle_url", subtitleURL).
+		Bool("has_subtitle", subtitleURL != "").
+		Msg("准备发布视频")
 
 	jsonData, err := json.Marshal(publishData)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("序列化发布数据失败: %w", err)
 	}
+
+	// 记录请求体（用于调试，仅前1000字符）
+	requestPreview := string(jsonData)
+	if len(requestPreview) > 1000 {
+		requestPreview = requestPreview[:1000] + "..."
+	}
+	logger.Debug().Str("request_body", requestPreview).Msg("发布视频请求体（预览）")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(jsonData))
 	if err != nil {
@@ -518,6 +1106,28 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 	}
 	defer resp.Body.Close()
 
+	// 读取响应体以便调试
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取发布响应失败: %w", err)
+	}
+
+	// 打印完整的 HTTP 响应信息
+	logger.Info().
+		Int("http_status_code", resp.StatusCode).
+		Str("http_status", resp.Status).
+		Str("response_body", string(bodyBytes)).
+		Msg("发布视频 HTTP 响应")
+
+	if resp.StatusCode != 200 {
+		logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("status", resp.Status).
+			Str("response", string(bodyBytes)).
+			Msg("发布视频返回非200状态码")
+		return "", fmt.Errorf("发布视频失败: HTTP %d (%s), 响应: %s", resp.StatusCode, resp.Status, string(bodyBytes))
+	}
+
 	var result struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -526,16 +1136,79 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("解析发布响应失败: %w", err)
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		logger.Error().
+			Err(err).
+			Str("response", string(bodyBytes)).
+			Msg("解析发布响应失败")
+		return "", fmt.Errorf("解析发布响应失败: %w, 响应: %s", err, string(bodyBytes))
 	}
 
 	if result.Code != 0 {
-		return "", fmt.Errorf("发布视频失败: %s", result.Message)
+		// 如果 message 为空或只有 "--"，使用 code 作为错误信息
+		errorMsg := result.Message
+		if errorMsg == "" || errorMsg == "--" {
+			errorMsg = fmt.Sprintf("错误代码: %d", result.Code)
+		}
+
+		// 打印完整的 HTTP 响应和请求信息以便排查问题
+		logger.Error().
+			Int("http_status_code", resp.StatusCode).
+			Str("http_status", resp.Status).
+			Int("api_code", result.Code).
+			Str("api_message", result.Message).
+			Str("request_body", string(jsonData)).
+			Str("response_body", string(bodyBytes)).
+			Str("api_url", apiURL).
+			Msg("发布视频返回错误，完整 HTTP 响应和请求体已记录")
+
+		return "", fmt.Errorf("发布视频失败: HTTP %d (%s), API code=%d, message=%s", resp.StatusCode, resp.Status, result.Code, errorMsg)
 	}
 
 	logger.Info().Str("aid", result.Data.AID).Msg("视频发布成功")
 	return result.Data.AID, nil
+}
+
+// validateRequiredFiles 在开始上传前检查所需文件是否存在
+func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []string, videoDir string) error {
+	// 1. 检查视频文件（必需）
+	if _, err := os.Stat(videoPath); err != nil {
+		return fmt.Errorf("视频文件不存在: %s, 错误: %w", videoPath, err)
+	}
+	logger.Info().Str("video_path", videoPath).Msg("✓ 视频文件存在")
+
+	// 2. 检查字幕文件（如果提供了路径）
+	for _, subtitlePath := range subtitlePaths {
+		if _, err := os.Stat(subtitlePath); err != nil {
+			return fmt.Errorf("字幕文件不存在: %s, 错误: %w", subtitlePath, err)
+		}
+		logger.Debug().Str("subtitle_path", subtitlePath).Msg("✓ 字幕文件存在")
+	}
+	if len(subtitlePaths) > 0 {
+		logger.Info().Int("count", len(subtitlePaths)).Msg("✓ 所有字幕文件存在")
+	}
+
+	// 3. 检查封面图（可选，但建议存在）
+	coverPath := filepath.Join(videoDir, "cover.jpg")
+	thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
+	hasCover := false
+
+	if _, err := os.Stat(coverPath); err == nil {
+		hasCover = true
+		logger.Info().Str("cover_path", coverPath).Msg("✓ 封面图文件存在 (cover.jpg)")
+	} else if _, err := os.Stat(thumbnailPath); err == nil {
+		hasCover = true
+		logger.Info().Str("thumbnail_path", thumbnailPath).Msg("✓ 封面图文件存在 (thumbnail.jpg)")
+	}
+
+	if !hasCover {
+		logger.Warn().
+			Str("video_dir", videoDir).
+			Msg("⚠ 未找到封面图文件 (cover.jpg 或 thumbnail.jpg)，将使用默认封面")
+	}
+
+	logger.Info().Msg("文件检查完成，所有必需文件都存在，可以开始上传")
+	return nil
 }
 
 // generateFilename 生成上传文件名
@@ -550,4 +1223,3 @@ func generateFilename(originalName string) string {
 	}
 	return fmt.Sprintf("n%sad%s%s", timestamp, random, ext)
 }
-

@@ -44,6 +44,12 @@ type Repository interface {
 	SavePendingDownloads(channelID string, pending *PendingDownloads) error
 	LoadPendingDownloads(channelID string) (*PendingDownloads, error)
 	UpdatePendingDownloadStatus(channelID, videoID string, resourceType string, status string, filePath string) error
+	// 上传状态管理
+	IsVideoUploaded(videoDir string) bool
+	MarkVideoUploading(videoDir string) error
+	MarkVideoUploaded(videoDir string, bilibiliAID string) error
+	MarkVideoUploadFailed(videoDir string, errorMsg string) error
+	FindCoverFile(videoDir string) (string, error)
 }
 
 // VideoInfo 视频信息结构，用于保存到JSON文件
@@ -933,4 +939,117 @@ func (r *repository) UpdatePendingDownloadStatus(channelID, videoID, resourceTyp
 	}
 
 	return r.SavePendingDownloads(channelID, pending)
+}
+
+// IsVideoUploaded 检查视频是否已上传到B站
+func (r *repository) IsVideoUploaded(videoDir string) bool {
+	statusFile := filepath.Join(videoDir, "upload_status.json")
+	data, err := os.ReadFile(statusFile)
+	if err != nil {
+		// 文件不存在，说明未上传
+		return false
+	}
+
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return false
+	}
+
+	// 检查上传状态
+	if uploadStatus, ok := status["status"].(string); ok {
+		return uploadStatus == "completed"
+	}
+
+	// 兼容旧格式（直接是 bool）
+	if uploaded, ok := status["uploaded"].(bool); ok {
+		return uploaded
+	}
+
+	return false
+}
+
+// MarkVideoUploading 标记视频开始上传
+func (r *repository) MarkVideoUploading(videoDir string) error {
+	return r.updateUploadStatus(videoDir, func(status map[string]interface{}) {
+		status["status"] = "uploading"
+		status["uploaded"] = false
+		status["started_at"] = time.Now().Unix()
+		// 清除之前的错误信息
+		delete(status, "error")
+		delete(status, "failed_at")
+		delete(status, "bilibili_aid")
+	})
+}
+
+// MarkVideoUploaded 标记视频上传完成
+func (r *repository) MarkVideoUploaded(videoDir string, bilibiliAID string) error {
+	return r.updateUploadStatus(videoDir, func(status map[string]interface{}) {
+		status["status"] = "completed"
+		status["uploaded"] = true
+		status["bilibili_aid"] = bilibiliAID
+		status["completed_at"] = time.Now().Unix()
+		// 清除错误信息
+		delete(status, "error")
+		delete(status, "failed_at")
+	})
+}
+
+// MarkVideoUploadFailed 标记视频上传失败
+func (r *repository) MarkVideoUploadFailed(videoDir string, errorMsg string) error {
+	return r.updateUploadStatus(videoDir, func(status map[string]interface{}) {
+		status["status"] = "failed"
+		status["uploaded"] = false
+		status["error"] = errorMsg
+		status["failed_at"] = time.Now().Unix()
+	})
+}
+
+// updateUploadStatus 更新上传状态文件
+func (r *repository) updateUploadStatus(videoDir string, updateFunc func(map[string]interface{})) error {
+	// 确保视频目录存在
+	if err := os.MkdirAll(videoDir, 0755); err != nil {
+		return fmt.Errorf("创建视频目录失败: %w", err)
+	}
+
+	statusFile := filepath.Join(videoDir, "upload_status.json")
+
+	// 读取现有状态（如果存在）
+	var status map[string]interface{}
+	data, err := os.ReadFile(statusFile)
+	if err == nil {
+		if err := json.Unmarshal(data, &status); err != nil {
+			// 如果解析失败，创建新状态
+			status = make(map[string]interface{})
+		}
+	} else {
+		// 文件不存在，创建新状态
+		status = make(map[string]interface{})
+	}
+
+	// 更新时间戳
+	status["updated_at"] = time.Now().Unix()
+
+	// 调用更新函数
+	updateFunc(status)
+
+	// 保存状态
+	data, err = json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化上传状态失败: %w", err)
+	}
+
+	if err := os.WriteFile(statusFile, data, 0644); err != nil {
+		return fmt.Errorf("保存上传状态失败: %w", err)
+	}
+
+	return nil
+}
+
+// FindCoverFile 查找封面图文件（cover.jpg）
+func (r *repository) FindCoverFile(videoDir string) (string, error) {
+	coverPath := filepath.Join(videoDir, "cover.jpg")
+	if _, err := os.Stat(coverPath); err == nil {
+		return coverPath, nil
+	}
+	return "", fmt.Errorf("未找到封面图文件")
 }

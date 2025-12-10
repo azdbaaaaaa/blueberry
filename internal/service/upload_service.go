@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	"blueberry/internal/config"
@@ -183,6 +184,15 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			}
 		}
 
+		// 检查是否已上传
+		if s.fileManager.IsVideoUploaded(videoDir) {
+			logger.Info().
+				Str("title", title).
+				Str("video_id", videoID).
+				Msg("视频已上传，跳过")
+			continue
+		}
+
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
 		if err != nil {
 			logger.Warn().Str("title", title).Str("video_id", videoID).Msg("未找到本地视频文件，跳过")
@@ -197,20 +207,58 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
 		}
 
+		// 检查封面图是否存在（可选，上传器会自动查找）
+		coverPath, _ := s.fileManager.FindCoverFile(videoDir)
+		if coverPath != "" {
+			logger.Debug().Str("cover_path", coverPath).Msg("找到封面图")
+		} else {
+			logger.Debug().Msg("未找到封面图，上传器将使用默认封面")
+		}
+
 		logger.Info().
 			Str("video_file", videoFile).
 			Str("title", videoTitle).
 			Int("subtitle_count", len(subtitlePaths)).
 			Msg("准备上传")
 
+		// 标记开始上传
+		if err := s.fileManager.MarkVideoUploading(videoDir); err != nil {
+			logger.Warn().Err(err).Msg("标记上传状态失败")
+		}
+
 		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
 		if err != nil {
+			errorMsg := err.Error()
 			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败")
-			continue
+			// 标记上传失败
+			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
+				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
+			}
+			// 发布失败时退出，方便排查问题
+			logger.Error().
+				Str("title", videoTitle).
+				Str("video_dir", videoDir).
+				Msg("上传失败，退出程序以便排查问题")
+			return fmt.Errorf("上传失败: %w", err)
 		}
 
 		if result.Success && result.VideoID != "" {
-			logger.Info().Str("video_id", result.VideoID).Str("title", videoTitle).Msg("上传成功")
+			logger.Info().
+				Str("video_id", result.VideoID).
+				Str("bilibili_aid", result.VideoID).
+				Str("title", videoTitle).
+				Str("video_dir", videoDir).
+				Msg("视频上传并发布成功")
+
+			// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
+			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID); err != nil {
+				logger.Warn().Err(err).Msg("标记上传完成状态失败")
+			} else {
+				logger.Info().
+					Str("video_id", result.VideoID).
+					Str("video_dir", videoDir).
+					Msg("上传状态已保存到 upload_status.json，下次运行将自动跳过此视频")
+			}
 
 			// 重命名字幕文件
 			if len(subtitlePaths) > 0 {
@@ -222,10 +270,16 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 				}
 			}
 		} else {
+			errorMsg := "上传完成但未获取到视频ID"
 			if result.Error != nil {
+				errorMsg = result.Error.Error()
 				logger.Error().Err(result.Error).Str("title", videoTitle).Msg("上传失败")
 			} else {
 				logger.Warn().Str("title", videoTitle).Msg("上传完成但未获取到视频ID，可能需要手动处理")
+			}
+			// 标记上传失败
+			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
+				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
 			}
 		}
 	}

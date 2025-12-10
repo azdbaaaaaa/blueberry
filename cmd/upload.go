@@ -16,12 +16,14 @@ import (
 var (
 	uploadVideoPath string
 	uploadAccount   string
+	uploadChannel   string
+	uploadAll       bool
 )
 
 var uploadCmd = &cobra.Command{
 	Use:   "upload",
 	Short: "上传视频到B站",
-	Long:  `将下载的视频上传到B站海外版指定的账号`,
+	Long:  `将下载的视频上传到B站海外版指定的账号。可以上传单个视频或整个频道。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Get()
 		if cfg == nil {
@@ -37,14 +39,37 @@ var uploadCmd = &cobra.Command{
 
 		logger.SetLevel(zerolog.InfoLevel)
 
+		ctx := context.Background()
+
+		// 如果指定了 --all，上传所有频道
+		if uploadAll {
+			logger.Info().Msg("开始上传所有频道")
+			if err := application.UploadService.UploadAllChannels(ctx); err != nil {
+				logger.Error().Err(err).Msg("上传所有频道失败")
+				os.Exit(1)
+			}
+			return
+		}
+
+		// 如果指定了 --channel，上传指定频道
+		if uploadChannel != "" {
+			logger.Info().Str("channel", uploadChannel).Msg("开始上传频道")
+			if err := application.UploadService.UploadChannel(ctx, uploadChannel); err != nil {
+				logger.Error().Err(err).Str("channel", uploadChannel).Msg("上传频道失败")
+				os.Exit(1)
+			}
+			return
+		}
+
+		// 否则，上传单个视频
 		if uploadVideoPath == "" {
-			fmt.Fprintf(os.Stderr, "请指定要上传的视频路径\n")
+			fmt.Fprintf(os.Stderr, "请指定要上传的视频路径（--video），或指定频道（--channel），或上传所有频道（--all）\n")
 			os.Exit(1)
 		}
 
 		accountName := uploadAccount
 		if accountName == "" {
-			fmt.Fprintf(os.Stderr, "请指定B站账号名称\n")
+			fmt.Fprintf(os.Stderr, "请指定B站账号名称（--account）\n")
 			os.Exit(1)
 		}
 
@@ -53,7 +78,6 @@ var uploadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		ctx := context.Background()
 		if err := application.UploadService.UploadSingleVideo(ctx, uploadVideoPath, accountName); err != nil {
 			os.Exit(1)
 		}
@@ -61,6 +85,8 @@ var uploadCmd = &cobra.Command{
 }
 
 func init() {
-	uploadCmd.Flags().StringVar(&uploadVideoPath, "video", "", "要上传的视频文件路径")
-	uploadCmd.Flags().StringVar(&uploadAccount, "account", "", "B站账号名称")
+	uploadCmd.Flags().StringVar(&uploadVideoPath, "video", "", "要上传的视频文件路径（单个视频模式）")
+	uploadCmd.Flags().StringVar(&uploadAccount, "account", "", "B站账号名称（单个视频模式）")
+	uploadCmd.Flags().StringVar(&uploadChannel, "channel", "", "要上传的频道URL（频道模式）")
+	uploadCmd.Flags().BoolVar(&uploadAll, "all", false, "上传配置文件中所有频道（全部频道模式）")
 }
