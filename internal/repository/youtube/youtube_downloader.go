@@ -46,14 +46,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 	videoID := d.fileRepo.ExtractVideoID(videoURL)
 
-	// 如果提供了 title，使用 title 创建目录；否则使用 videoID（兼容旧逻辑）
-	var videoDir string
-	var err error
-	if title != "" {
-		videoDir, err = d.fileRepo.EnsureVideoDirByTitle(channelID, title)
-	} else {
-		videoDir, err = d.fileRepo.EnsureVideoDir(channelID, videoID)
-	}
+	// 使用视频ID创建目录（不再使用标题）
+	videoDir, err := d.fileRepo.EnsureVideoDir(channelID, videoID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,23 +153,6 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		Err(lastErr).
 		Msg("下载失败，已重试所有次数")
 	return nil, fmt.Errorf("下载失败: %w, 输出: %s", lastErr, lastOutput)
-
-	videoFile, err := d.fileRepo.FindVideoFile(videoDir)
-	if err != nil {
-		return nil, fmt.Errorf("查找视频文件失败: %w", err)
-	}
-	result.VideoPath = videoFile
-
-	subtitleFiles, err := d.fileRepo.FindSubtitleFiles(videoDir)
-	if err == nil {
-		result.SubtitlePaths = subtitleFiles
-		// 如果下载的是 VTT 格式，尝试转换为 SRT
-		result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
-	}
-
-	result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
-
-	return result, nil
 }
 
 func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string) []string {
@@ -231,14 +208,19 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 
 	// yt-dlp 支持通过 --sub-langs 指定多个语言（逗号分隔）
 	// 也支持 --write-sub 和 --write-auto-sub 来下载手动和自动生成的字幕
+	// 添加 --sleep-subtitles 参数，在下载字幕之间添加延迟，避免 429 错误
 	if len(languages) > 0 {
 		args = append(args, "--write-sub", "--write-auto-sub")
 		// 使用 --sub-langs 参数，多个语言用逗号分隔
 		subLangs := strings.Join(languages, ",")
 		args = append(args, "--sub-langs", subLangs)
+		// 在下载字幕之间添加 2 秒延迟，避免触发 429 错误
+		args = append(args, "--sleep-subtitles", "2")
 	} else {
 		// 如果 languages 为空，下载所有可用字幕
 		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all")
+		// 在下载字幕之间添加 2 秒延迟，避免触发 429 错误
+		args = append(args, "--sleep-subtitles", "2")
 	}
 
 	// 将字幕转换为 SRT 格式（更通用，兼容性更好）

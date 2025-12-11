@@ -13,25 +13,25 @@ bilibili:
   # 格式：Netscape 格式（.txt）或 JSON 格式
   # 导出方法：使用浏览器扩展（如 "Get cookies.txt LOCALLY" for Chrome）
   # 例如: cookies_file: "./bilibili_cookies.txt"
-  cookies_file: "./cookies/youtube_cookies.txt"
+  # cookies_file: "./cookies/youtube_cookies.txt"
 
 youtube_channels:
-  - url: "https://www.youtube.com/@Comic-likerhythm"
+  - url: "https://www.youtube.com/@Comic-likerhythm/videos"
     bilibili_account: "account5"
     languages: ["en", "id", "vn", "zh"]  # Anime Dragon / 漫感律动
-  # - url: "https://www.youtube.com/@%E5%B7%9D%E5%A5%88%E5%8B%95%E6%BC%AB"
+  # - url: "https://www.youtube.com/@%E5%B7%9D%E5%A5%88%E5%8B%95%E6%BC%AB/videos"
   #   bilibili_account: "account1"
   #   languages: ["en", "id", "my", "th", "vn", "zh"]  # 川奈動漫
   # - url: "https://www.youtube.com/@Qixiang-Animation/videos"
   #   bilibili_account: "account2"
-  #   languages: ["en", "id", "my", "th", "zh"]  # Qixiang-Animation
-  # - url: "https://www.youtube.com/@%E7%A5%9E%E9%BE%8D%E6%BC%AB%E7%A0%94%E7%A4%BE"
+  #   languages: ["en", "id", "my", "th", "zh"]  # Qixiang-Animation  
+  # - url: "https://www.youtube.com/@%E7%A5%9E%E9%BE%8D%E6%BC%AB%E7%A0%94%E7%A4%BE/videos"
   #   bilibili_account: "account3"
   #   languages: ["en", "id", "my", "vn", "zh"]  # Anime Shenlong
-  # - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB"
+  # - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB/videos"
   #   bilibili_account: "account4"
   #   languages: ["en", "id", "th", "zh"]  # 魔力動漫俱樂部 Mag
-  # - url: "https://www.youtube.com/@%E5%8B%95%E6%BC%AB%E6%A0%B8%E7%88%86%E5%B1%80-manju"
+  # - url: "https://www.youtube.com/@%E5%8B%95%E6%BC%AB%E6%A0%B8%E7%88%86%E5%B1%80-manju/videos"
   #   bilibili_account: "account6"
   #   languages: ["en", "id", "my", "zh"]  # 動漫核爆局
   # - url: "https://www.youtube.com/@%E6%9B%BC%E6%B3%A2%E5%8B%95%E6%BC%AB/videos"

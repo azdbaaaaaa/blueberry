@@ -31,7 +31,7 @@ type Repository interface {
 
 	MarkVideoDownloading(videoDir string, videoURL string) error
 	MarkVideoFailed(videoDir string, errorMsg string) error
-	InitializeDownloadStatus(videoDir string, videoURL string, subtitleURLs map[string]string, thumbnailURL string) error
+	InitializeDownloadStatus(videoDir string, videoURL string, subtitleURLs map[string]string, subtitleLanguages []string, thumbnailURL string) error
 	MarkSubtitlesDownloaded(videoDir string, languages []string) error
 	MarkSubtitlesDownloadedWithPaths(videoDir string, languages []string, subtitlePaths map[string]string, subtitleURLs map[string]string) error
 	MarkThumbnailDownloaded(videoDir string) error
@@ -50,6 +50,8 @@ type Repository interface {
 	MarkVideoUploaded(videoDir string, bilibiliAID string) error
 	MarkVideoUploadFailed(videoDir string, errorMsg string) error
 	FindCoverFile(videoDir string) (string, error)
+	// 从 download_status.json 中提取字幕语言列表
+	GetSubtitleLanguagesFromStatus(videoDir string) ([]string, error)
 }
 
 // VideoInfo 视频信息结构，用于保存到JSON文件
@@ -639,7 +641,8 @@ func (r *repository) MarkVideoDownloading(videoDir string, videoURL string) erro
 }
 
 // InitializeDownloadStatus 初始化下载状态文件，包含所有资源的 URL（从 video_info.json 或 rawData 中读取）
-func (r *repository) InitializeDownloadStatus(videoDir string, videoURL string, subtitleURLs map[string]string, thumbnailURL string) error {
+// subtitleLanguages: 需要下载的字幕语言列表（即使没有URL，也会保存语言列表）
+func (r *repository) InitializeDownloadStatus(videoDir string, videoURL string, subtitleURLs map[string]string, subtitleLanguages []string, thumbnailURL string) error {
 	return r.updateDownloadStatus(videoDir, func(status map[string]interface{}) {
 		// 初始化视频状态
 		if status["video"] == nil {
@@ -673,6 +676,8 @@ func (r *repository) InitializeDownloadStatus(videoDir string, videoURL string, 
 			subtitles = make(map[string]interface{})
 			status["subtitles"] = subtitles
 		}
+
+		// 首先，为所有有URL的字幕设置状态
 		for lang, url := range subtitleURLs {
 			if subtitles[lang] == nil {
 				subtitles[lang] = make(map[string]interface{})
@@ -690,6 +695,31 @@ func (r *repository) InitializeDownloadStatus(videoDir string, videoURL string, 
 			}
 			if url != "" {
 				sub["url"] = url
+			}
+		}
+
+		// 然后，为所有配置的语言（即使没有URL）也设置状态
+		// 这样后续下载时可以根据语言列表来下载
+		for _, lang := range subtitleLanguages {
+			// 如果已经有URL了，跳过（上面已经处理了）
+			if _, hasURL := subtitleURLs[lang]; hasURL {
+				continue
+			}
+			// 如果没有URL，也创建一个条目，标记为 pending，但没有 url
+			if subtitles[lang] == nil {
+				subtitles[lang] = make(map[string]interface{})
+			}
+			sub, ok := subtitles[lang].(map[string]interface{})
+			if !ok {
+				sub = make(map[string]interface{})
+				subtitles[lang] = sub
+			}
+			// 如果还没有状态，设置为 pending
+			if _, hasStatus := sub["status"]; !hasStatus {
+				sub["status"] = "pending"
+				sub["downloaded"] = false
+				sub["resource_type"] = "subtitle"
+				// 不设置 url，表示需要后续下载时获取
 			}
 		}
 
@@ -1052,4 +1082,27 @@ func (r *repository) FindCoverFile(videoDir string) (string, error) {
 		return coverPath, nil
 	}
 	return "", fmt.Errorf("未找到封面图文件")
+}
+
+// GetSubtitleLanguagesFromStatus 从 download_status.json 中提取字幕语言列表
+func (r *repository) GetSubtitleLanguagesFromStatus(videoDir string) ([]string, error) {
+	statusFile := filepath.Join(videoDir, "download_status.json")
+	data, err := os.ReadFile(statusFile)
+	if err != nil {
+		return nil, fmt.Errorf("读取下载状态文件失败: %w", err)
+	}
+
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil, fmt.Errorf("解析下载状态文件失败: %w", err)
+	}
+
+	var languages []string
+	if subtitles, ok := status["subtitles"].(map[string]interface{}); ok {
+		for lang := range subtitles {
+			languages = append(languages, lang)
+		}
+	}
+
+	return languages, nil
 }

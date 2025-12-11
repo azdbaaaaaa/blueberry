@@ -33,7 +33,7 @@ func init() {
 	rootCmd.AddCommand(downloadCmd)
 	rootCmd.AddCommand(uploadCmd)
 	rootCmd.AddCommand(syncCmd)
-	rootCmd.AddCommand(renameCmd)
+	rootCmd.AddCommand(syncChannelCmd)
 }
 
 func initConfig() {

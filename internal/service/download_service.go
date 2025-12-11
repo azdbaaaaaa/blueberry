@@ -34,6 +34,14 @@ type DownloadService interface {
 	// videoURL: YouTube视频的完整URL
 	// 直接下载，不使用频道信息文件
 	DownloadSingleVideo(ctx context.Context, videoURL string) error
+
+	// DownloadChannel 下载指定频道的所有视频
+	// channelDir: 频道目录路径（例如：downloads/Comic-likerhythm）
+	DownloadChannel(ctx context.Context, channelDir string) error
+
+	// DownloadVideoDir 下载指定视频目录的视频
+	// videoDir: 视频目录路径（例如：downloads/Comic-likerhythm/videoID）
+	DownloadVideoDir(ctx context.Context, videoDir string) error
 }
 
 type downloadService struct {
@@ -110,8 +118,21 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 			Msg("视频数量发生变化，将更新频道信息")
 	}
 
-	// 确保频道目录存在
-	_, err = s.fileManager.EnsureChannelDir(channelID)
+	// 从第一个视频中获取真正的频道ID（channel_id），如果没有视频则使用URL提取的ID
+	realChannelID := channelID
+	if len(videos) > 0 {
+		firstVideo := videos[0]
+		if firstVideo.ChannelID != "" {
+			realChannelID = firstVideo.ChannelID
+			logger.Info().
+				Str("extracted_channel_id", channelID).
+				Str("real_channel_id", realChannelID).
+				Msg("使用视频中的频道ID作为目录名")
+		}
+	}
+
+	// 确保频道目录存在（使用真正的频道ID）
+	_, err = s.fileManager.EnsureChannelDir(realChannelID)
 	if err != nil {
 		logger.Error().Err(err).Msg("创建频道目录失败")
 		return err
@@ -162,45 +183,55 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 			videoMap["availability"] = video.Availability
 		}
 
-		// 为每个视频创建目录（使用 title 作为目录名）
-		title, _ := videoMap["title"].(string)
-		if title == "" {
-			title = video.Title
+		// 为每个视频创建目录（使用视频ID作为目录名）
+		videoID, _ := videoMap["id"].(string)
+		if videoID == "" {
+			videoID = video.ID
 		}
-		if title == "" {
-			// 如果 title 为空，使用 video ID 作为后备
-			videoID, _ := videoMap["id"].(string)
-			if videoID == "" {
-				videoID = video.ID
-			}
-			title = fmt.Sprintf("video_%s", videoID)
+		if videoID == "" {
+			logger.Warn().
+				Int("index", i+1).
+				Msg("视频ID为空，跳过")
+			continue
 		}
 
-		videoDir, err := s.fileManager.EnsureVideoDirByTitle(channelID, title)
+		videoDir, err := s.fileManager.EnsureVideoDir(realChannelID, videoID)
 		if err != nil {
 			logger.Warn().
 				Int("index", i+1).
-				Str("title", title).
+				Str("video_id", videoID).
 				Err(err).
 				Msg("创建视频目录失败，跳过")
 			continue
 		}
 
 		// 构建 VideoInfo 并保存到各自目录
-		videoID, _ := videoMap["id"].(string)
-		if videoID == "" {
-			videoID = video.ID
-		}
 		videoURL, _ := videoMap["url"].(string)
 		if videoURL == "" {
 			videoURL = video.URL
+		}
+		title, _ := videoMap["title"].(string)
+		if title == "" {
+			title = video.Title
 		}
 
 		// 构建缩略图列表
 		thumbnails := s.buildThumbnailsFromRawData(videoMap)
 
+		// 获取频道配置的语言列表
+		languages := s.getChannelLanguages(channel)
+
+		// 从 rawData 中提取字幕URL（仅提取配置中指定的语言）
+		subtitleURLs := s.extractSubtitleURLs(videoMap, languages)
+
+		// 提取缩略图URL（使用最后一个，通常是最高质量的）
+		thumbnailURL := ""
+		if len(thumbnails) > 0 {
+			thumbnailURL = thumbnails[len(thumbnails)-1].URL
+		}
+
 		// 构建 VideoInfo（此时还没有字幕信息，字幕信息在下载时添加）
-		videoInfo := s.buildVideoInfoFromRawData(videoMap, videoID, title, videoURL, make(map[string]string), thumbnails)
+		videoInfo := s.buildVideoInfoFromRawData(videoMap, videoID, title, videoURL, subtitleURLs, thumbnails)
 
 		// 保存视频信息到各自目录（解析阶段，仅保存基本信息，不表示已下载）
 		if err := s.fileManager.SaveVideoInfo(videoDir, videoInfo); err != nil {
@@ -218,29 +249,47 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 				Msg("视频解析信息已保存（未下载）")
 		}
 
+		// 初始化下载状态文件（包含所有资源的URL，状态为pending）
+		// 即使没有字幕URL，也保存需要下载的语言列表
+		if err := s.fileManager.InitializeDownloadStatus(videoDir, videoURL, subtitleURLs, languages, thumbnailURL); err != nil {
+			logger.Warn().
+				Int("index", i+1).
+				Str("title", title).
+				Str("video_dir", videoDir).
+				Err(err).
+				Msg("初始化下载状态失败")
+		} else {
+			logger.Debug().
+				Int("index", i+1).
+				Str("title", title).
+				Str("video_dir", videoDir).
+				Int("subtitle_count", len(subtitleURLs)).
+				Msg("下载状态已初始化（pending）")
+		}
+
 		videoMaps = append(videoMaps, videoMap)
 	}
 
 	// 保存频道信息到文件（总是更新，确保数据是最新的）
-	if err := s.fileManager.SaveChannelInfo(channelID, videoMaps); err != nil {
+	if err := s.fileManager.SaveChannelInfo(realChannelID, videoMaps); err != nil {
 		logger.Error().Err(err).Msg("保存频道信息失败")
 		return err
 	}
 
 	logger.Info().
-		Str("channel_id", channelID).
+		Str("channel_id", realChannelID).
 		Int("video_count", len(videos)).
 		Msg("频道信息已保存")
 
 	// 生成待下载状态文件（在解析后立即生成，方便查看）
 	languages := s.getChannelLanguages(channel)
-	if err := s.generatePendingDownloads(channelID, channel.URL, videoMaps, languages); err != nil {
+	if err := s.generatePendingDownloads(realChannelID, channel.URL, videoMaps, languages); err != nil {
 		logger.Warn().Err(err).Msg("生成待下载状态文件失败")
 	} else {
-		channelDir, _ := s.fileManager.EnsureChannelDir(channelID)
+		channelDir, _ := s.fileManager.EnsureChannelDir(realChannelID)
 		statusFile := filepath.Join(channelDir, "pending_downloads.json")
 		logger.Info().
-			Str("channel_id", channelID).
+			Str("channel_id", realChannelID).
 			Str("status_file", statusFile).
 			Msg("待下载状态文件已生成")
 	}
@@ -250,23 +299,67 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 
 // downloadFromChannelInfo 根据已保存的频道信息下载单个频道的视频（内部方法）
 func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *config.YouTubeChannel) error {
-	channelID := s.fileManager.ExtractChannelID(channel.URL)
+	extractedChannelID := s.fileManager.ExtractChannelID(channel.URL)
 	languages := s.getChannelLanguages(channel)
 
 	logger.Info().
 		Str("channel_url", channel.URL).
-		Str("channel_id", channelID).
+		Str("extracted_channel_id", extractedChannelID).
 		Msg("开始下载频道视频")
 
 	if len(languages) > 0 {
 		logger.Info().Strs("languages", languages).Msg("字幕语言")
 	}
 
-	// 从文件加载频道信息
-	videoMaps, err := s.fileManager.LoadChannelInfo(channelID)
+	// 尝试从文件加载频道信息（先使用提取的ID）
+	var videoMaps []map[string]interface{}
+	var err error
+	channelID := extractedChannelID
+	videoMaps, err = s.fileManager.LoadChannelInfo(channelID)
 	if err != nil {
-		logger.Error().Err(err).Msg("加载频道信息失败，请先执行 ParseChannels")
-		return err
+		// 如果使用提取的ID加载失败，尝试从输出目录中查找包含 channel_info.json 的目录
+		// 并检查其中的第一个视频的 channel_id 是否匹配
+		logger.Debug().Err(err).Msg("使用提取的频道ID加载失败，尝试查找真实频道ID")
+
+		// 扫描输出目录，查找包含 channel_info.json 的目录
+		outputDir := s.cfg.Output.Directory
+		entries, readErr := os.ReadDir(outputDir)
+		if readErr == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				potentialChannelDir := filepath.Join(outputDir, entry.Name())
+				channelInfoPath := filepath.Join(potentialChannelDir, "channel_info.json")
+				if _, statErr := os.Stat(channelInfoPath); statErr == nil {
+					// 找到了 channel_info.json，尝试加载并检查第一个视频的 channel_id
+					potentialVideoMaps, loadErr := s.fileManager.LoadChannelInfo(entry.Name())
+					if loadErr == nil && len(potentialVideoMaps) > 0 {
+						// 检查第一个视频的 channel_id 或 channel_url 是否匹配
+						firstVideo := potentialVideoMaps[0]
+						videoChannelID, _ := firstVideo["channel_id"].(string)
+						videoChannelURL, _ := firstVideo["channel_url"].(string)
+
+						// 如果 channel_id 或 channel_url 匹配，使用这个目录
+						if videoChannelID == extractedChannelID || videoChannelURL == channel.URL {
+							channelID = entry.Name()
+							videoMaps = potentialVideoMaps
+							logger.Info().
+								Str("found_channel_id", channelID).
+								Msg("找到匹配的频道目录")
+							err = nil
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// 如果仍然失败，返回错误
+		if err != nil {
+			logger.Error().Err(err).Msg("加载频道信息失败，请先执行 ParseChannels")
+			return err
+		}
 	}
 
 	logger.Info().Int("count", len(videoMaps)).Msg("从文件加载视频列表")
@@ -586,24 +679,16 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 	languages []string,
 	rawData map[string]interface{},
 ) error {
-	// 查找或创建视频目录（优先使用 title，因为下载器也会使用 title）
+	// 查找或创建视频目录（使用视频ID）
 	var videoDir string
 	var err error
-	if title != "" {
-		// 使用 title 创建目录（与下载器保持一致）
-		videoDir, err = s.fileManager.EnsureVideoDirByTitle(channelID, title)
+	// 先尝试查找已存在的目录（可能之前用标题创建的）
+	videoDir, _ = s.fileManager.FindVideoDirByID(channelID, videoID)
+	if videoDir == "" {
+		// 如果找不到，使用视频ID创建新目录
+		videoDir, err = s.fileManager.EnsureVideoDir(channelID, videoID)
 		if err != nil {
-			logger.Warn().Err(err).Msg("创建视频目录失败，尝试使用 videoID")
-			videoDir, _ = s.fileManager.FindVideoDirByID(channelID, videoID)
-			if videoDir == "" {
-				videoDir, _ = s.fileManager.EnsureVideoDir(channelID, videoID)
-			}
-		}
-	} else {
-		// 如果没有 title，使用 videoID
-		videoDir, _ = s.fileManager.FindVideoDirByID(channelID, videoID)
-		if videoDir == "" {
-			videoDir, _ = s.fileManager.EnsureVideoDir(channelID, videoID)
+			return fmt.Errorf("创建视频目录失败: %w", err)
 		}
 	}
 
@@ -670,7 +755,8 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 
 			// 初始化下载状态（包含所有资源的 URL）
 			// 注意：如果之前失败过，InitializeDownloadStatus 不会覆盖失败状态
-			if err := s.fileManager.InitializeDownloadStatus(videoDir, videoURL, subtitleURLs, thumbnailURL); err != nil {
+			// 即使没有字幕URL，也保存需要下载的语言列表
+			if err := s.fileManager.InitializeDownloadStatus(videoDir, videoURL, subtitleURLs, languages, thumbnailURL); err != nil {
 				logger.Warn().Err(err).Str("video_dir", videoDir).Msg("初始化下载状态文件失败")
 			} else {
 				statusFile := filepath.Join(videoDir, "download_status.json")
@@ -1185,4 +1271,76 @@ func (s *downloadService) copyFile(src, dst string) error {
 	}
 
 	return nil
+}
+
+// extractSubtitleURLs 从 rawData 中提取字幕URL（仅提取配置中指定的语言）
+func (s *downloadService) extractSubtitleURLs(rawData map[string]interface{}, languages []string) map[string]string {
+	subtitleURLs := make(map[string]string)
+
+	if rawData == nil {
+		return subtitleURLs
+	}
+
+	// 如果 languages 为空，不提取字幕URL
+	if len(languages) == 0 {
+		return subtitleURLs
+	}
+
+	// 创建一个语言代码的映射，用于快速查找
+	langMap := make(map[string]bool)
+	for _, lang := range languages {
+		langMap[lang] = true
+		// 也支持变体，例如 zh-Hans 匹配 zh
+		if strings.Contains(lang, "-") {
+			langMap[strings.Split(lang, "-")[0]] = true
+		}
+	}
+
+	// 提取手动字幕 URL
+	// yt-dlp 的 subtitles 格式：map[lang][]map[string]interface{}
+	if subtitles, ok := rawData["subtitles"].(map[string]interface{}); ok {
+		for lang, langData := range subtitles {
+			// 检查是否是配置中指定的语言
+			if !langMap[lang] && !langMap[strings.Split(lang, "-")[0]] {
+				continue
+			}
+			// langData 可能是 []interface{}（多个格式）
+			if formats, ok := langData.([]interface{}); ok {
+				for _, format := range formats {
+					if formatMap, ok := format.(map[string]interface{}); ok {
+						if url, ok := formatMap["url"].(string); ok && url != "" {
+							subtitleURLs[lang] = url
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 提取自动字幕 URL（优先级较低，如果手动字幕已存在则不覆盖）
+	if autoSubtitles, ok := rawData["automatic_captions"].(map[string]interface{}); ok {
+		for lang, langData := range autoSubtitles {
+			// 检查是否是配置中指定的语言，且手动字幕不存在
+			if _, exists := subtitleURLs[lang]; exists {
+				continue
+			}
+			if !langMap[lang] && !langMap[strings.Split(lang, "-")[0]] {
+				continue
+			}
+			// langData 可能是 []interface{}（多个格式）
+			if formats, ok := langData.([]interface{}); ok {
+				for _, format := range formats {
+					if formatMap, ok := format.(map[string]interface{}); ok {
+						if url, ok := formatMap["url"].(string); ok && url != "" {
+							subtitleURLs[lang] = url
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return subtitleURLs
 }
