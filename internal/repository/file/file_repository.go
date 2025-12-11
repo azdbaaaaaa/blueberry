@@ -9,6 +9,24 @@ import (
 	"time"
 )
 
+func shortenErrorMessage(msg string) string {
+	s := strings.TrimSpace(msg)
+	if s == "" {
+		return s
+	}
+	// 仅保留首行，避免长堆栈
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	// 限长，按 rune 截断，避免乱码
+	const limit = 300
+	runes := []rune(s)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "..."
+	}
+	return s
+}
+
 type Repository interface {
 	FindVideoFile(dir string) (string, error)
 	FindSubtitleFiles(dir string) ([]string, error)
@@ -772,7 +790,9 @@ func (r *repository) MarkVideoFailed(videoDir string, errorMsg string) error {
 		video["status"] = "failed"
 		video["downloaded"] = false
 		video["resource_type"] = "video"
-		video["error"] = errorMsg
+		if errorMsg != "" {
+			video["error"] = shortenErrorMessage(errorMsg)
+		}
 		video["failed_at"] = time.Now().Unix()
 	})
 }
@@ -809,6 +829,9 @@ func (r *repository) MarkSubtitlesDownloadedWithPaths(videoDir string, languages
 			sub["resource_type"] = "subtitle"
 			sub["downloaded"] = true
 			sub["downloaded_at"] = time.Now().Unix()
+			// 清除之前失败的痕迹
+			delete(sub, "error")
+			delete(sub, "failed_at")
 			if subtitlePaths != nil {
 				if path, ok := subtitlePaths[lang]; ok {
 					sub["file_path"] = path
@@ -880,7 +903,7 @@ func (r *repository) MarkSubtitleFailed(videoDir string, lang string, errorMsg s
 		sub["downloaded"] = false
 		sub["resource_type"] = "subtitle"
 		if errorMsg != "" {
-			sub["error"] = errorMsg
+			sub["error"] = shortenErrorMessage(errorMsg)
 		}
 		sub["failed_at"] = time.Now().Unix()
 	})
@@ -1075,7 +1098,9 @@ func (r *repository) MarkVideoUploadFailed(videoDir string, errorMsg string) err
 	return r.updateUploadStatus(videoDir, func(status map[string]interface{}) {
 		status["status"] = "failed"
 		status["uploaded"] = false
-		status["error"] = errorMsg
+		if errorMsg != "" {
+			status["error"] = shortenErrorMessage(errorMsg)
+		}
 		status["failed_at"] = time.Now().Unix()
 	})
 }

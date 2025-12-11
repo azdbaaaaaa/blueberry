@@ -63,7 +63,7 @@ var uploadCmd = &cobra.Command{
 
 		// 否则，上传单个视频
 		if uploadVideoPath == "" {
-			fmt.Fprintf(os.Stderr, "请指定要上传的视频路径（--video），或指定频道（--channel），或上传所有频道（--all）\n")
+			fmt.Fprintf(os.Stderr, "请指定要上传的视频目录路径（--video-dir），或指定频道（--channel），或上传所有频道（--all）\n")
 			os.Exit(1)
 		}
 
@@ -85,7 +85,7 @@ var uploadCmd = &cobra.Command{
 }
 
 func init() {
-	uploadCmd.Flags().StringVar(&uploadVideoPath, "video", "", "要上传的视频文件路径（单个视频模式）")
+	uploadCmd.Flags().StringVar(&uploadVideoPath, "video-dir", "", "要上传的视频目录路径（单个视频模式）")
 	uploadCmd.Flags().StringVar(&uploadAccount, "account", "", "B站账号名称（单个视频模式）")
 	uploadCmd.Flags().StringVar(&uploadChannel, "channel", "", "要上传的频道URL（频道模式）")
 	uploadCmd.Flags().BoolVar(&uploadAll, "all", false, "上传配置文件中所有频道（全部频道模式）")

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -75,7 +76,26 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return nil
 	}
 
-	videoDir := filepath.Dir(videoPath)
+	// 允许传入“目录或文件”。目录时在目录中查找实际视频文件。
+	videoDir := videoPath
+	videoFile := videoPath
+	if info, err := os.Stat(videoPath); err == nil {
+		if info.IsDir() {
+			videoDir = videoPath
+			if vf, err := s.fileManager.FindVideoFile(videoDir); err == nil && vf != "" {
+				videoFile = vf
+			} else {
+				logger.Error().Str("video_dir", videoDir).Msg("未在该目录找到本地视频文件")
+				return fmt.Errorf("未在目录中找到视频文件: %s", videoDir)
+			}
+		} else {
+			videoDir = filepath.Dir(videoPath)
+			videoFile = videoPath
+		}
+	} else {
+		return fmt.Errorf("路径不存在: %s", videoPath)
+	}
+
 	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
 	// 优先选择英文字幕
 	subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
@@ -87,18 +107,49 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		Int("total_subtitles", len(allSubtitlePaths)).
 		Int("selected_subtitles", len(subtitlePaths)).
 		Msg("字幕文件选择完成")
-	videoTitle := s.fileManager.ExtractVideoTitleFromFile(videoPath)
+	// 优先用 video_info.json 的 Title，缺省回退文件名
+	videoTitle := ""
+	if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
+		if t := strings.TrimSpace(info.Title); t != "" {
+			videoTitle = t
+		}
+	}
+	if videoTitle == "" {
+		videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
+	}
 
-	logger.Info().Str("video_path", videoPath).Str("title", videoTitle).Msg("开始上传视频")
+	logger.Info().
+		Str("video_dir", videoDir).
+		Str("video_file", videoFile).
+		Str("title", videoTitle).
+		Msg("开始上传视频")
 
-	result, err := s.uploader.UploadVideo(ctx, videoPath, videoTitle, subtitlePaths, account)
+	// 标记开始上传
+	if err := s.fileManager.MarkVideoUploading(videoDir); err != nil {
+		logger.Warn().Err(err).Msg("标记上传状态失败")
+	}
+
+	result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
 	if err != nil {
 		logger.Error().Err(err).Msg("上传失败")
+		// 标记上传失败
+		if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, err.Error()); markErr != nil {
+			logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
+		}
 		return err
 	}
 
 	if result.Success {
 		logger.Info().Str("video_id", result.VideoID).Msg("上传成功")
+		// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
+		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID); err != nil {
+			logger.Warn().Err(err).Msg("标记上传完成状态失败")
+		} else {
+			logger.Info().
+				Str("video_id", result.VideoID).
+				Str("video_dir", videoDir).
+				Msg("上传状态已保存到 upload_status.json，下次运行将自动跳过此视频")
+		}
 
 		// 重命名字幕文件
 		if len(subtitlePaths) > 0 {

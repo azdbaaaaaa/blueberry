@@ -89,14 +89,7 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		return nil, fmt.Errorf("文件检查失败: %w", err)
 	}
 
-	// 2. 上传视频（使用实际找到的文件路径）
-	filename, err := u.uploadVideo(ctx, actualVideoPath)
-	if err != nil {
-		return nil, fmt.Errorf("上传视频失败: %w", err)
-	}
-	logger.Info().Str("filename", filename).Msg("视频上传完成")
-
-	// 2. 上传字幕
+	// 2. 先上传字幕（如失败仅警告继续）
 	var subtitleURL string
 	if len(subtitlePaths) > 0 {
 		subtitleURL, err = u.uploadSubtitles(ctx, subtitlePaths)
@@ -112,7 +105,14 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		}
 	}
 
-	// 3. 上传封面图
+	// 3. 上传视频（使用实际找到的文件路径）
+	filename, err := u.uploadVideo(ctx, actualVideoPath)
+	if err != nil {
+		return nil, fmt.Errorf("上传视频失败: %w", err)
+	}
+	logger.Info().Str("filename", filename).Msg("视频上传完成")
+
+	// 4. 上传封面图
 	var coverURL string
 	// 优先查找 cover.jpg，如果没有则查找 thumbnail.jpg
 	coverPath := filepath.Join(filepath.Dir(videoPath), "cover.jpg")
@@ -136,7 +136,7 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		logger.Debug().Msg("未找到封面图文件（cover.jpg 或 thumbnail.jpg），将使用默认封面")
 	}
 
-	// 4. 发布视频
+	// 5. 发布视频
 	// 注意：发布时 filename 不应该包含 .mp4 后缀
 	publishFilename := filename
 	if strings.HasSuffix(publishFilename, ".mp4") {
@@ -730,9 +730,7 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		return "", fmt.Errorf("转换字幕格式失败: %w", err)
 	}
 
-	// 2. 进行合法性检查
-	// 如果字幕条目太多，可能需要分批检查，但先尝试一次性检查
-	// 如果失败，可以考虑跳过合法性检查或分批处理
+	// 2. 分批进行合法性检查（避免单次请求过大导致 -400）
 	checkURL := u.buildAPIURL("/intl/videoup/web2/subtitle/multi-check")
 
 	// 检查字幕条目是否为空
@@ -743,118 +741,197 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 
 	logger.Info().
 		Int("entry_count", len(entries)).
-		Msg("开始字幕合法性检查")
-
-	// 如果条目太多（超过1000），记录警告
-	if len(entries) > 1000 {
-		logger.Warn().
-			Int("entry_count", len(entries)).
-			Msg("字幕条目数量较多，合法性检查可能会失败，如果失败可以尝试跳过检查")
-	}
-
-	checkData := map[string]interface{}{
-		"subtitles": entries,
-	}
-
-	jsonData, err := json.Marshal(checkData)
-	if err != nil {
-		return "", fmt.Errorf("序列化字幕数据失败: %w", err)
-	}
-
-	logger.Debug().
-		Int("request_size", len(jsonData)).
-		Msg("字幕合法性检查请求大小")
-
-	req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(jsonData))
-	if err != nil {
-		return "", err
-	}
-
-	u.setCookies(req)
-	u.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(jsonData)))
-
-	resp, err := u.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("字幕合法性检查失败: 请求错误: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应体以便调试
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取字幕检查响应失败: %w", err)
-	}
-
-	if resp.StatusCode != 200 {
-		logger.Error().
-			Int("status_code", resp.StatusCode).
-			Str("response", string(bodyBytes)).
-			Msg("字幕合法性检查返回非200状态码")
-		return "", fmt.Errorf("字幕合法性检查失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	var checkResult struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			HitIDs []string `json:"hit_ids"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(bodyBytes, &checkResult); err != nil {
-		logger.Error().
-			Err(err).
-			Str("response", string(bodyBytes)).
-			Msg("解析字幕检查响应失败")
-		return "", fmt.Errorf("解析检查响应失败: %w, 响应: %s", err, string(bodyBytes))
-	}
-
-	if checkResult.Code != 0 {
-		// code=-400 可能是请求格式问题或包含不合法内容
-		// 如果条目太多，可能是请求体过大；如果条目较少，可能是内容不合法
-		logger.Error().
-			Int("code", checkResult.Code).
-			Str("message", checkResult.Message).
-			Int("entry_count", len(entries)).
-			Int("request_size", len(jsonData)).
-			Str("response", string(bodyBytes)).
-			Msg("字幕合法性检查失败")
-
-		// 如果条目太多导致失败，建议跳过合法性检查
-		if len(entries) > 1000 {
-			logger.Warn().
-				Int("entry_count", len(entries)).
-				Msg("字幕条目过多可能导致合法性检查失败。如果字幕文件包含不合法内容，请手动检查并删除不合法条目后重试")
-		} else {
-			logger.Warn().
-				Int("entry_count", len(entries)).
-				Msg("字幕合法性检查失败，可能包含不合法内容。请检查字幕文件，删除不合法条目后重试")
+		Msg("开始字幕合法性检查（分批）")
+	batchSize := 200
+	var allHitIDs []string
+	checkFailed := false
+	for start := 0; start < len(entries); start += batchSize {
+		end := start + batchSize
+		if end > len(entries) {
+			end = len(entries)
 		}
-
-		// 返回错误，但允许调用方决定是否继续（目前会继续上传，只是没有字幕）
-		return "", fmt.Errorf("字幕合法性检查失败: code=%d, message=%s (条目数: %d, 请求大小: %d bytes). 请检查字幕文件并删除不合法内容", checkResult.Code, checkResult.Message, len(entries), len(jsonData))
+		batch := entries[start:end]
+		hitIDs, err := u.checkSubtitleBatch(ctx, checkURL, batch)
+		if err != nil {
+			logger.Warn().
+				Err(err).
+				Int("batch_start", start).
+				Int("batch_end", end).
+				Msg("字幕合法性检查分批失败，将跳过校验并继续上传字幕")
+			checkFailed = true
+			break
+		}
+		if len(hitIDs) > 0 {
+			allHitIDs = append(allHitIDs, hitIDs...)
+		}
+	}
+	if !checkFailed && len(allHitIDs) > 0 {
+		hitSet := make(map[string]struct{}, len(allHitIDs))
+		for _, id := range allHitIDs {
+			hitSet[id] = struct{}{}
+		}
+		var filtered []subtitle.BilibiliSubtitleEntry
+		for _, e := range entries {
+			if _, bad := hitSet[e.ID]; !bad {
+				filtered = append(filtered, e)
+			}
+		}
+		logger.Warn().
+			Int("hit_count", len(allHitIDs)).
+			Int("before", len(entries)).
+			Int("after", len(filtered)).
+			Msg("已过滤不合法字幕条目")
+		entries = filtered
 	}
 
-	if len(checkResult.Data.HitIDs) > 0 {
-		logger.Warn().Strs("hit_ids", checkResult.Data.HitIDs).Msg("字幕包含敏感内容，但继续上传")
+	// 3. 获取字幕直传 OSS 的临时凭证
+	tokenURL := u.buildAPIURL("/intl/videoup/web2/upload/token?type=subtitle")
+	tokenReq, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建字幕上传凭证请求失败: %w", err)
+	}
+	u.setCookies(tokenReq)
+	u.setHeaders(tokenReq)
+	tokenResp, err := u.httpClient.Do(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("获取字幕上传凭证失败: %w", err)
+	}
+	defer tokenResp.Body.Close()
+	tokenBody, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取字幕上传凭证响应失败: %w", err)
+	}
+	if tokenResp.StatusCode != 200 {
+		return "", fmt.Errorf("获取字幕上传凭证失败: HTTP %d, body=%s", tokenResp.StatusCode, string(tokenBody))
+	}
+	var token struct {
+		Code int            `json:"code"`
+		Msg  string         `json:"message"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(tokenBody, &token); err != nil {
+		return "", fmt.Errorf("解析字幕上传凭证失败: %w, body=%s", err, string(tokenBody))
+	}
+	if token.Code != 0 {
+		return "", fmt.Errorf("字幕上传凭证返回错误: code=%d, message=%s, body=%s", token.Code, token.Msg, string(tokenBody))
+	}
+	extractStr := func(m map[string]any, keys ...string) string {
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				if s, ok2 := v.(string); ok2 && s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	host := extractStr(token.Data, "host", "Host")
+	key := extractStr(token.Data, "key", "Key", "key_prefix", "keyPrefix", "dir", "Dir")
+	accessKey := extractStr(token.Data, "OSSAccessKeyId", "accessid", "accessKeyId")
+	policy := extractStr(token.Data, "policy", "Policy")
+	signature := extractStr(token.Data, "signature", "Signature")
+	successStatus := extractStr(token.Data, "success_action_status", "successActionStatus")
+	if successStatus == "" {
+		successStatus = "200"
+	}
+	if host == "" || accessKey == "" || policy == "" || signature == "" {
+		return "", fmt.Errorf("字幕上传凭证字段缺失: host=%q key=%q accessKey=%q policy=%q signature=%q", host, key, accessKey, policy, signature)
+	}
+	// 如果 key 为空，尝试从 policy 的 starts-with 条件提取 key 前缀并拼接文件名
+	// 如果 key 为空或看起来只是前缀（常见以 "_" 结尾或不包含 "subtitle-"），从 policy/或该前缀拼最终文件名
+	if key == "" || strings.HasSuffix(key, "_") || !strings.Contains(key, "subtitle-") {
+		type policyDoc struct {
+			Expiration string        `json:"expiration"`
+			Conditions []interface{} `json:"conditions"`
+		}
+		var doc policyDoc
+		if decoded, err := base64.StdEncoding.DecodeString(policy); err == nil {
+			_ = json.Unmarshal(decoded, &doc)
+		} else if decoded, err2 := base64.RawStdEncoding.DecodeString(policy); err2 == nil {
+			_ = json.Unmarshal(decoded, &doc)
+		}
+		prefix := ""
+		for _, c := range doc.Conditions {
+			// 期望形如 ["starts-with", "$key", "ugc/subtitle/1765..._hash_"]
+			if arr, ok := c.([]interface{}); ok && len(arr) >= 3 {
+				if s0, ok0 := arr[0].(string); ok0 && s0 == "starts-with" {
+					if s1, ok1 := arr[1].(string); ok1 && (s1 == "$key" || s1 == "key") {
+						if s2, ok2 := arr[2].(string); ok2 {
+							prefix = s2
+							break
+						}
+					}
+				}
+			}
+		}
+		ts := time.Now().UnixMilli()
+		if prefix != "" {
+			key = fmt.Sprintf("%ssubtitle-%d.json", prefix, ts)
+		} else {
+			// 如果 token 自身的 key 看起来像是前缀，优先使用它
+			rawPrefix := extractStr(token.Data, "key", "Key", "key_prefix", "keyPrefix", "dir", "Dir")
+			if rawPrefix != "" && (strings.HasSuffix(rawPrefix, "_") || !strings.Contains(rawPrefix, "subtitle-")) {
+				key = fmt.Sprintf("%ssubtitle-%d.json", rawPrefix, ts)
+			} else {
+				key = fmt.Sprintf("ugc/subtitle/%d_%s_subtitle-%d.json", ts, generateHash(srtPath), ts)
+			}
+		}
+		logger.Debug().Str("derived_key", key).Str("prefix", prefix).Msg("从 policy conditions 推导字幕 key")
+	}
+	if !strings.HasPrefix(host, "http") {
+		host = "https://" + host
 	}
 
-	// 3. 上传到 OSS（根据 HAR 文件，字幕上传到 ali-sgp-intl-common-p.oss-accelerate.aliyuncs.com）
-	// 注意：实际的上传 URL 可能需要从 API 获取，这里先使用一个占位符
-	// 根据 HAR 文件，字幕 URL 格式：ugc/subtitle/{timestamp}_{hash}_subtitle-{timestamp}.json
-	timestamp := time.Now().Unix()
-	subtitleFilename := fmt.Sprintf("subtitle-%d.json", timestamp)
-	subtitleURL := fmt.Sprintf("ugc/subtitle/%d_%s_%s", timestamp, generateHash(srtPath), subtitleFilename)
+	// 4. 构建字幕 JSON（与 multi-check 相同结构）
+	subJSON, err := json.Marshal(map[string]any{"subtitles": entries})
+	if err != nil {
+		return "", fmt.Errorf("序列化字幕JSON失败: %w", err)
+	}
 
-	// 实际上传逻辑（需要根据实际 API 调整）
-	// 这里先返回一个 URL，实际实现可能需要调用上传 API
+	// 5. 直传 OSS（multipart/form-data）
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	_ = writer.WriteField("key", key)
+	_ = writer.WriteField("OSSAccessKeyId", accessKey)
+	_ = writer.WriteField("policy", policy)
+	_ = writer.WriteField("signature", signature)
+	_ = writer.WriteField("success_action_status", successStatus)
+	// 确保 Content-Type 满足 policy 的 in 条件
+	_ = writer.WriteField("Content-Type", "application/octet-stream")
+	// 文件字段
+	fileField, err := writer.CreateFormFile("file", "subtitle.json")
+	if err != nil {
+		return "", fmt.Errorf("创建字幕表单文件字段失败: %w", err)
+	}
+	if _, err := fileField.Write(subJSON); err != nil {
+		return "", fmt.Errorf("写入字幕表单文件内容失败: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("关闭字幕表单失败: %w", err)
+	}
+
+	ossReq, err := http.NewRequestWithContext(ctx, "POST", host, &buf)
+	if err != nil {
+		return "", fmt.Errorf("创建字幕直传请求失败: %w", err)
+	}
+	ossReq.Header.Set("Content-Type", writer.FormDataContentType())
+	// OSS 请求不强制需要 B站 Cookie，但保留通用 headers
+	u.setHeaders(ossReq)
+	ossResp, err := u.httpClient.Do(ossReq)
+	if err != nil {
+		return "", fmt.Errorf("字幕直传失败: %w", err)
+	}
+	defer ossResp.Body.Close()
+	ossBody, _ := io.ReadAll(ossResp.Body)
+	if ossResp.StatusCode != 200 {
+		return "", fmt.Errorf("字幕直传失败: HTTP %d, body=%s", ossResp.StatusCode, string(ossBody))
+	}
+
+	subtitleURL := key
 	logger.Info().
 		Str("subtitle_url", subtitleURL).
 		Int("entry_count", len(entries)).
-		Msg("字幕上传完成（模拟）")
-
+		Msg("字幕上传完成（直传 OSS）")
 	return subtitleURL, nil
 }
 
@@ -869,6 +946,17 @@ func (u *httpUploader) checkSubtitleBatch(ctx context.Context, checkURL string, 
 		return nil, fmt.Errorf("序列化字幕数据失败: %w", err)
 	}
 
+	// 记录请求预览（限制长度）
+	reqPreview := string(jsonData)
+	if len(reqPreview) > 2000 {
+		reqPreview = reqPreview[:2000] + "..."
+	}
+	logger.Debug().
+		Int("batch_size", len(batch)).
+		Int("request_size", len(jsonData)).
+		Str("request_preview", reqPreview).
+		Msg("字幕合法性检查请求（预览）")
+
 	req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, err
@@ -881,7 +969,7 @@ func (u *httpUploader) checkSubtitleBatch(ctx context.Context, checkURL string, 
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("字幕合法性检查失败: 请求错误: %w", err)
+		return nil, fmt.Errorf("字幕合法性检查失败: 请求错误: %w (request_preview=%s)", err, previewForLog(string(jsonData), 1000))
 	}
 	defer resp.Body.Close()
 
@@ -891,6 +979,11 @@ func (u *httpUploader) checkSubtitleBatch(ctx context.Context, checkURL string, 
 	}
 
 	if resp.StatusCode != 200 {
+		logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("response", previewForLog(string(bodyBytes), 1000)).
+			Str("request_preview", previewForLog(string(jsonData), 1000)).
+			Msg("字幕合法性检查返回非200状态码")
 		return nil, fmt.Errorf("字幕合法性检查失败: HTTP %d, 响应: %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -903,10 +996,21 @@ func (u *httpUploader) checkSubtitleBatch(ctx context.Context, checkURL string, 
 	}
 
 	if err := json.Unmarshal(bodyBytes, &checkResult); err != nil {
+		logger.Error().
+			Err(err).
+			Str("response", previewForLog(string(bodyBytes), 1000)).
+			Str("request_preview", previewForLog(string(jsonData), 1000)).
+			Msg("解析字幕检查响应失败")
 		return nil, fmt.Errorf("解析检查响应失败: %w, 响应: %s", err, string(bodyBytes))
 	}
 
 	if checkResult.Code != 0 {
+		logger.Error().
+			Int("code", checkResult.Code).
+			Str("message", checkResult.Message).
+			Str("request_preview", previewForLog(string(jsonData), 1000)).
+			Str("response_preview", previewForLog(string(bodyBytes), 1000)).
+			Msg("字幕合法性检查返回错误")
 		return nil, fmt.Errorf("字幕合法性检查失败: code=%d, message=%s", checkResult.Code, checkResult.Message)
 	}
 
