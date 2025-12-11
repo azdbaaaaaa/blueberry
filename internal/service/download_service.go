@@ -858,30 +858,79 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
 			if err != nil {
 				logger.Warn().Err(err).Msg("下载字幕失败，继续处理其他任务")
+				// 标记所有字幕为失败状态
+				for _, lang := range languages {
+					if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, fmt.Sprintf("下载字幕失败: %v", err)); err != nil {
+						logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
+					}
+					// 同时更新 pending_downloads.json
+					s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
+				}
 			} else {
 				logger.Info().Int("subtitle_count", len(result.SubtitlePaths)).Msg("字幕下载完成")
 			}
 		}
-		// 如果视频刚下载，字幕应该已经在下载结果中，这里我们需要从文件系统中查找
+		// 如果视频刚下载，字幕应该已经在下载结果中
 
 		// 获取字幕信息并更新状态
 		subtitleInfo, err := s.subtitleManager.ListSubtitles(ctx, videoURL, languages)
 		if err != nil {
 			logger.Warn().Err(err).Msg("获取字幕信息失败")
+			// 如果获取字幕信息失败，标记所有配置的语言为失败状态
+			for _, lang := range languages {
+				if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, fmt.Sprintf("获取字幕信息失败: %v", err)); err != nil {
+					logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
+				}
+				// 同时更新 pending_downloads.json
+				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
+			}
 		} else if subtitleInfo != nil {
 			downloadedLanguages := make([]string, 0)
 			subtitlePaths := make(map[string]string)
+			seenLanguages := make(map[string]bool) // 用于去重
+
+			// 获取所有字幕文件（只查找一次）
+			subtitleFiles, _ := s.fileManager.FindSubtitleFiles(videoDir)
 
 			for _, sub := range subtitleInfo.SubtitleURLs {
 				subtitleMap[sub.Language] = sub.URL
-				// 检查字幕文件是否存在
-				subtitleFiles, _ := s.fileManager.FindSubtitleFiles(videoDir)
-				for _, subPath := range subtitleFiles {
-					if strings.Contains(subPath, "."+sub.Language+".") || strings.Contains(subPath, "-"+sub.Language+".") {
-						downloadedLanguages = append(downloadedLanguages, sub.Language)
-						subtitlePaths[sub.Language] = subPath
-						break
+
+				// 如果已经处理过这个语言，跳过
+				if seenLanguages[sub.Language] {
+					continue
+				}
+
+				// 优先查找已重命名的文件格式 {video_id}_{lang}.srt
+				videoID := s.fileManager.ExtractVideoID(videoURL)
+				expectedName := fmt.Sprintf("%s_%s.srt", videoID, sub.Language)
+				expectedPath := filepath.Join(videoDir, expectedName)
+
+				var foundPath string
+				// 首先检查期望的文件名
+				if _, err := os.Stat(expectedPath); err == nil {
+					foundPath = expectedPath
+				} else {
+					// 如果期望的文件不存在，查找其他格式（兼容旧格式）
+					for _, subPath := range subtitleFiles {
+						base := filepath.Base(subPath)
+						// 忽略 .frame.srt 文件
+						if strings.Contains(base, ".frame.srt") {
+							continue
+						}
+						// 检查文件名是否包含语言代码（支持 .{lang}. 和 _{lang}. 格式）
+						if strings.Contains(base, "."+sub.Language+".") ||
+							strings.Contains(base, "-"+sub.Language+".") ||
+							strings.Contains(base, "_"+sub.Language+".") {
+							foundPath = subPath
+							break
+						}
 					}
+				}
+
+				if foundPath != "" {
+					downloadedLanguages = append(downloadedLanguages, sub.Language)
+					subtitlePaths[sub.Language] = foundPath
+					seenLanguages[sub.Language] = true
 				}
 			}
 
@@ -895,6 +944,43 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 						subPath := subtitlePaths[lang]
 						s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "completed", subPath)
 					}
+				}
+			}
+
+			// 检查是否有未下载的字幕（标记为失败）
+			for _, lang := range languages {
+				found := false
+				for _, downloadedLang := range downloadedLanguages {
+					if lang == downloadedLang {
+						found = true
+						break
+					}
+				}
+				if !found {
+					// 如果字幕应该存在但没有找到，标记为失败
+					// 检查是否在 subtitleInfo 中存在（YouTube 上是否有这个语言的字幕）
+					hasSubtitleURL := false
+					for _, sub := range subtitleInfo.SubtitleURLs {
+						if sub.Language == lang {
+							hasSubtitleURL = true
+							break
+						}
+					}
+
+					errorMsg := ""
+					if !hasSubtitleURL {
+						errorMsg = "该语言的字幕在 YouTube 上不存在"
+					} else {
+						errorMsg = "字幕文件未找到"
+					}
+
+					if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, errorMsg); err != nil {
+						logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
+					} else {
+						logger.Warn().Str("lang", lang).Str("error", errorMsg).Msg("字幕下载失败，已标记为失败")
+					}
+					// 同时更新 pending_downloads.json
+					s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
 				}
 			}
 		}
@@ -912,59 +998,56 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 	// ========== 步骤 3: 下载缩略图并设置为封面图 ==========
 	thumbnailDownloaded := s.fileManager.IsThumbnailDownloaded(videoDir)
 	thumbnails := s.buildThumbnailsFromRawData(rawData) // 用于保存视频信息
-	coverPath := filepath.Join(videoDir, "cover.jpg")
+	var coverPath string
 	hasCover := false
 
 	if !thumbnailDownloaded {
 		logger.Info().Str("video_id", videoID).Msg("开始下载缩略图")
 
 		thumbnailURL := ""
-		if len(thumbnails) > 0 && thumbnails[0].URL != "" {
-			thumbnailURL = thumbnails[0].URL
+		if len(thumbnails) > 0 {
+			thumbnailURL = thumbnails[len(thumbnails)-1].URL // 使用最后一个缩略图
 		}
 
-		if err := s.downloadThumbnails(ctx, videoDir, rawData); err != nil {
+		downloadedCoverPath, err := s.downloadThumbnails(ctx, videoDir, rawData)
+		if err != nil {
 			logger.Warn().Err(err).Msg("下载缩略图失败")
 			s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, "thumbnail", "failed", "")
-		} else {
-			thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
-			if err := s.fileManager.MarkThumbnailDownloadedWithPath(videoDir, thumbnailPath, thumbnailURL); err != nil {
+		} else if downloadedCoverPath != "" {
+			coverPath = downloadedCoverPath
+			if err := s.fileManager.MarkThumbnailDownloadedWithPath(videoDir, coverPath, thumbnailURL); err != nil {
 				logger.Warn().Err(err).Msg("标记缩略图下载状态失败")
 			} else {
-				logger.Info().Str("thumbnail_path", thumbnailPath).Msg("缩略图下载完成")
-				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, "thumbnail", "completed", thumbnailPath)
-
-				// 将缩略图复制为封面图
-				if err := s.copyFile(thumbnailPath, coverPath); err != nil {
-					logger.Warn().Err(err).Msg("复制缩略图为封面图失败")
-				} else {
-					logger.Info().
-						Str("cover_path", coverPath).
-						Str("thumbnail_path", thumbnailPath).
-						Msg("缩略图已复制为封面图")
-					hasCover = true
-				}
+				logger.Info().Str("cover_path", coverPath).Msg("缩略图已下载为 cover.{ext} 格式")
+				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, "thumbnail", "completed", coverPath)
+				hasCover = true
 			}
 		}
 	} else {
-		logger.Info().Str("video_id", videoID).Msg("缩略图已下载，跳过")
-		// 检查缩略图是否存在，如果存在则复制为封面图
-		thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
-		if _, err := os.Stat(thumbnailPath); err == nil {
-			// 如果封面图不存在，复制缩略图为封面图
-			if _, err := os.Stat(coverPath); os.IsNotExist(err) {
-				if err := s.copyFile(thumbnailPath, coverPath); err != nil {
-					logger.Warn().Err(err).Msg("复制缩略图为封面图失败")
-				} else {
-					logger.Info().
-						Str("cover_path", coverPath).
-						Str("thumbnail_path", thumbnailPath).
-						Msg("缩略图已复制为封面图")
-					hasCover = true
-				}
-			} else {
+		logger.Info().Str("video_id", videoID).Msg("缩略图已下载，检查封面图")
+		// 检查是否存在 cover.{ext} 文件（可能是 .jpg, .png, .webp 等）
+		possibleExtensions := []string{".jpg", ".jpeg", ".png", ".webp", ".gif"}
+		for _, ext := range possibleExtensions {
+			potentialCoverPath := filepath.Join(videoDir, "cover"+ext)
+			if _, err := os.Stat(potentialCoverPath); err == nil {
+				coverPath = potentialCoverPath
 				hasCover = true
 				logger.Info().Str("cover_path", coverPath).Msg("封面图已存在")
+				break
+			}
+		}
+		// 兼容旧格式：如果找不到 cover.{ext}，检查是否有 thumbnail.jpg
+		if !hasCover {
+			thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
+			if _, err := os.Stat(thumbnailPath); err == nil {
+				// 将旧的 thumbnail.jpg 重命名为 cover.jpg
+				coverPath = filepath.Join(videoDir, "cover.jpg")
+				if err := os.Rename(thumbnailPath, coverPath); err != nil {
+					logger.Warn().Err(err).Msg("重命名旧缩略图失败")
+				} else {
+					hasCover = true
+					logger.Info().Str("cover_path", coverPath).Msg("已将旧缩略图重命名为 cover.jpg")
+				}
 			}
 		}
 	}
@@ -1032,36 +1115,123 @@ func (s *downloadService) buildThumbnailsFromRawData(rawData map[string]interfac
 	return thumbnails
 }
 
-// downloadThumbnails 下载视频缩略图
-func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir string, rawData map[string]interface{}) error {
+// downloadThumbnails 下载视频缩略图，保存为 cover.{ext} 格式
+func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir string, rawData map[string]interface{}) (string, error) {
 	if rawData == nil {
-		return nil
+		return "", nil
 	}
 
 	thumbnails := s.buildThumbnailsFromRawData(rawData)
 	if len(thumbnails) == 0 {
-		return nil
+		return "", nil
 	}
 
-	// 下载第一个缩略图（通常是最高质量的）
-	thumbnail := thumbnails[0]
+	// 下载最后一个缩略图（通常是最高质量的）
+	thumbnail := thumbnails[len(thumbnails)-1]
 	if thumbnail.URL == "" {
-		return nil
+		return "", nil
 	}
 
-	// 使用 curl 或 wget 下载缩略图
-	thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
-	cmd := exec.CommandContext(ctx, "curl", "-L", "-o", thumbnailPath, thumbnail.URL)
+	// 从 URL 中提取文件扩展名
+	ext := s.extractExtensionFromURL(thumbnail.URL)
+	if ext == "" {
+		// 如果无法从 URL 提取，默认使用 .jpg
+		ext = ".jpg"
+	}
+
+	// 直接下载为 cover.{ext} 格式
+	coverPath := filepath.Join(videoDir, "cover"+ext)
+
+	// 先下载到临时文件，然后检测实际文件类型
+	tempPath := filepath.Join(videoDir, "cover_temp"+ext)
+	cmd := exec.CommandContext(ctx, "curl", "-L", "-o", tempPath, thumbnail.URL)
 	if err := cmd.Run(); err != nil {
 		// 如果 curl 失败，尝试使用 wget
-		cmd = exec.CommandContext(ctx, "wget", "-O", thumbnailPath, thumbnail.URL)
+		cmd = exec.CommandContext(ctx, "wget", "-O", tempPath, thumbnail.URL)
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("下载缩略图失败: %w", err)
+			return "", fmt.Errorf("下载缩略图失败: %w", err)
 		}
 	}
 
-	logger.Info().Str("thumbnail_path", thumbnailPath).Msg("缩略图已下载")
-	return nil
+	// 检测实际文件类型
+	actualExt := s.detectImageExtension(tempPath)
+	if actualExt != ext {
+		// 如果检测到的扩展名与从 URL 提取的不同，使用检测到的扩展名
+		newCoverPath := filepath.Join(videoDir, "cover"+actualExt)
+		if err := os.Rename(tempPath, newCoverPath); err != nil {
+			// 如果重命名失败，删除临时文件
+			os.Remove(tempPath)
+			return "", fmt.Errorf("重命名缩略图失败: %w", err)
+		}
+		coverPath = newCoverPath
+		ext = actualExt
+	} else {
+		// 如果扩展名正确，直接重命名
+		if err := os.Rename(tempPath, coverPath); err != nil {
+			os.Remove(tempPath)
+			return "", fmt.Errorf("重命名缩略图失败: %w", err)
+		}
+	}
+
+	logger.Info().Str("cover_path", coverPath).Msg("缩略图已下载为 cover.{ext} 格式")
+	return coverPath, nil
+}
+
+// extractExtensionFromURL 从 URL 中提取文件扩展名
+func (s *downloadService) extractExtensionFromURL(url string) string {
+	// 移除查询参数
+	urlWithoutQuery := strings.Split(url, "?")[0]
+	// 提取扩展名
+	ext := filepath.Ext(urlWithoutQuery)
+	if ext == "" {
+		return ""
+	}
+	// 转换为小写并确保以 . 开头
+	ext = strings.ToLower(ext)
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	return ext
+}
+
+// detectImageExtension 检测图片文件的实际扩展名
+func (s *downloadService) detectImageExtension(filePath string) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ".jpg" // 默认返回 .jpg
+	}
+	defer file.Close()
+
+	// 读取文件头部的几个字节来检测图片类型
+	buffer := make([]byte, 512)
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		return ".jpg"
+	}
+	if n < 4 {
+		return ".jpg"
+	}
+
+	// 检测常见的图片格式
+	// JPEG: FF D8 FF
+	if n >= 3 && buffer[0] == 0xFF && buffer[1] == 0xD8 && buffer[2] == 0xFF {
+		return ".jpg"
+	}
+	// PNG: 89 50 4E 47
+	if n >= 4 && buffer[0] == 0x89 && buffer[1] == 0x50 && buffer[2] == 0x4E && buffer[3] == 0x47 {
+		return ".png"
+	}
+	// GIF: 47 49 46 38
+	if n >= 4 && buffer[0] == 0x47 && buffer[1] == 0x49 && buffer[2] == 0x46 && buffer[3] == 0x38 {
+		return ".gif"
+	}
+	// WebP: RIFF ... WEBP
+	if n >= 12 && string(buffer[0:4]) == "RIFF" && string(buffer[8:12]) == "WEBP" {
+		return ".webp"
+	}
+
+	// 如果无法检测，默认返回 .jpg
+	return ".jpg"
 }
 
 // generateCoverFromVideo 从视频第一帧生成封面图

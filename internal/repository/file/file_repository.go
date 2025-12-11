@@ -34,6 +34,7 @@ type Repository interface {
 	InitializeDownloadStatus(videoDir string, videoURL string, subtitleURLs map[string]string, subtitleLanguages []string, thumbnailURL string) error
 	MarkSubtitlesDownloaded(videoDir string, languages []string) error
 	MarkSubtitlesDownloadedWithPaths(videoDir string, languages []string, subtitlePaths map[string]string, subtitleURLs map[string]string) error
+	MarkSubtitleFailed(videoDir string, lang string, errorMsg string) error
 	MarkThumbnailDownloaded(videoDir string) error
 	MarkThumbnailDownloadedWithPath(videoDir, thumbnailPath string, thumbnailURL string) error
 	ChannelInfoExists(channelID string) bool
@@ -522,6 +523,12 @@ func (r *repository) IsSubtitlesDownloaded(videoDir string, languages []string) 
 			for _, subData := range subtitles {
 				// 新格式：map[string]interface{}
 				if subMap, ok := subData.(map[string]interface{}); ok {
+					// 检查 status 字段，如果状态是 "failed" 或 "pending"，不算已下载
+					if statusStr, ok := subMap["status"].(string); ok {
+						if statusStr == "failed" || statusStr == "pending" {
+							continue
+						}
+					}
 					if downloaded, ok := subMap["downloaded"].(bool); ok && downloaded {
 						return true
 					}
@@ -544,6 +551,13 @@ func (r *repository) IsSubtitlesDownloaded(videoDir string, languages []string) 
 			}
 			// 新格式：map[string]interface{}
 			if subMap, ok := subData.(map[string]interface{}); ok {
+				// 检查 status 字段，如果状态是 "failed" 或 "pending"，需要重新下载
+				if statusStr, ok := subMap["status"].(string); ok {
+					if statusStr == "failed" || statusStr == "pending" {
+						return false
+					}
+				}
+				// 检查 downloaded 字段
 				if downloaded, ok := subMap["downloaded"].(bool); !ok || !downloaded {
 					return false
 				}
@@ -840,6 +854,38 @@ func (r *repository) MarkThumbnailDownloadedWithPath(videoDir, thumbnailPath str
 	})
 }
 
+// MarkSubtitleFailed 标记字幕下载失败
+func (r *repository) MarkSubtitleFailed(videoDir string, lang string, errorMsg string) error {
+	return r.updateDownloadStatus(videoDir, func(status map[string]interface{}) {
+		if status["subtitles"] == nil {
+			status["subtitles"] = make(map[string]interface{})
+		}
+		subtitles, ok := status["subtitles"].(map[string]interface{})
+		if !ok {
+			subtitles = make(map[string]interface{})
+			status["subtitles"] = subtitles
+		}
+
+		subData := subtitles[lang]
+		var sub map[string]interface{}
+		if subMap, ok := subData.(map[string]interface{}); ok {
+			sub = subMap
+		} else {
+			// 兼容旧格式，如果是 bool，转换为 map
+			sub = make(map[string]interface{})
+			subtitles[lang] = sub
+		}
+
+		sub["status"] = "failed"
+		sub["downloaded"] = false
+		sub["resource_type"] = "subtitle"
+		if errorMsg != "" {
+			sub["error"] = errorMsg
+		}
+		sub["failed_at"] = time.Now().Unix()
+	})
+}
+
 // updateDownloadStatus 更新下载状态文件
 func (r *repository) updateDownloadStatus(videoDir string, updateFunc func(map[string]interface{})) error {
 	statusFile := filepath.Join(videoDir, "download_status.json")
@@ -1075,11 +1121,15 @@ func (r *repository) updateUploadStatus(videoDir string, updateFunc func(map[str
 	return nil
 }
 
-// FindCoverFile 查找封面图文件（cover.jpg）
+// FindCoverFile 查找封面图文件（cover.{ext}，支持多种图片格式）
 func (r *repository) FindCoverFile(videoDir string) (string, error) {
-	coverPath := filepath.Join(videoDir, "cover.jpg")
-	if _, err := os.Stat(coverPath); err == nil {
-		return coverPath, nil
+	// 尝试查找 cover.{ext} 格式的文件（支持多种扩展名）
+	possibleExtensions := []string{".jpg", ".jpeg", ".png", ".webp", ".gif"}
+	for _, ext := range possibleExtensions {
+		coverPath := filepath.Join(videoDir, "cover"+ext)
+		if _, err := os.Stat(coverPath); err == nil {
+			return coverPath, nil
+		}
 	}
 	return "", fmt.Errorf("未找到封面图文件")
 }

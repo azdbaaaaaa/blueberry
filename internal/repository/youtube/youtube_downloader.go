@@ -1,11 +1,15 @@
 package youtube
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,10 +87,21 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			subtitleFiles, err := d.fileRepo.FindSubtitleFiles(videoDir)
 			if err == nil {
 				result.SubtitlePaths = subtitleFiles
+				// 清理旧的 .frame.srt 文件（不再需要帧格式转换）
+				d.cleanupFrameSrtFiles(videoDir)
 				// 如果下载的是 VTT 格式，尝试转换为 SRT
 				result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
-				// 将毫秒格式的 SRT 转换为帧格式（保存到新文件）
-				result.SubtitlePaths = d.convertSRTToFrameFormatIfNeeded(videoDir, result.SubtitlePaths)
+				// 检查字幕时间轴重叠
+				for _, subPath := range result.SubtitlePaths {
+					if err := d.validateSubtitleOverlap(subPath); err != nil {
+						logger.Warn().
+							Str("subtitle_path", subPath).
+							Err(err).
+							Msg("字幕时间轴重叠检查失败")
+					}
+				}
+				// 重命名字幕文件为 {video_id}_{lang}.{ext} 格式（暂时禁用）
+				// result.SubtitlePaths = d.renameSubtitlesToIDFormat(videoDir, videoID, result.SubtitlePaths)
 			}
 
 			result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
@@ -157,7 +172,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string) []string {
 	args := []string{
-		"-o", filepath.Join(videoDir, "%(title)s.%(ext)s"),
+		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
 		"--no-warnings",
 		// 使用 extractor-args 指定多个客户端，提高成功率
 		// 优先使用 android 客户端（更不容易被检测）
@@ -303,7 +318,7 @@ func (d *downloader) convertVTTToSRTIfNeeded(videoDir string, subtitlePaths []st
 	return convertedPaths
 }
 
-// convertSRTToFrameFormatIfNeeded 如果需要，将毫秒格式的 SRT 转换为帧格式（保存到新文件）
+// convertSRTToFrameFormatIfNeeded 如果需要，将毫秒格式的 SRT 转换为帧格式（直接覆盖原文件）
 func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePaths []string) []string {
 	var convertedPaths []string
 	var hasConverted bool
@@ -321,12 +336,31 @@ func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePa
 						Msg("转换 SRT 为帧格式失败，保留原文件")
 					convertedPaths = append(convertedPaths, path)
 				} else {
-					logger.Info().
-						Str("original_path", path).
-						Str("frame_path", frameSrtPath).
-						Msg("毫秒格式 SRT 已转换为帧格式（保存到新文件）")
-					convertedPaths = append(convertedPaths, frameSrtPath)
-					hasConverted = true
+					// 将 .frame.srt 文件重命名为 .srt，覆盖原文件
+					// 先删除原文件
+					if err := os.Remove(path); err != nil {
+						logger.Warn().
+							Str("original_path", path).
+							Err(err).
+							Msg("删除原毫秒格式文件失败")
+					}
+					// 将 .frame.srt 重命名为 .srt
+					finalPath := strings.TrimSuffix(frameSrtPath, ".frame.srt") + ".srt"
+					if err := os.Rename(frameSrtPath, finalPath); err != nil {
+						logger.Warn().
+							Str("frame_path", frameSrtPath).
+							Str("final_path", finalPath).
+							Err(err).
+							Msg("重命名帧格式文件失败，保留 .frame.srt 文件")
+						convertedPaths = append(convertedPaths, frameSrtPath)
+					} else {
+						logger.Info().
+							Str("original_path", path).
+							Str("final_path", finalPath).
+							Msg("毫秒格式 SRT 已转换为帧格式并覆盖原文件")
+						convertedPaths = append(convertedPaths, finalPath)
+						hasConverted = true
+					}
 				}
 			} else {
 				// 已经是帧格式，直接添加
@@ -345,4 +379,337 @@ func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePa
 	}
 
 	return convertedPaths
+}
+
+// renameSubtitlesToIDFormat 将字幕文件重命名为 {video_id}_{lang}.{ext} 格式
+// 输入格式可能是：{video_id}.{lang}.{ext} 或 {video_id}.{lang}.frame.srt
+func (d *downloader) renameSubtitlesToIDFormat(videoDir, videoID string, subtitlePaths []string) []string {
+	var renamedPaths []string
+
+	for _, subtitlePath := range subtitlePaths {
+		base := filepath.Base(subtitlePath)
+
+		// 处理可能的 .frame.srt 后缀
+		var ext string
+		var nameWithoutExt string
+		if strings.HasSuffix(strings.ToLower(base), ".frame.srt") {
+			ext = ".frame.srt"
+			nameWithoutExt = strings.TrimSuffix(base, ext)
+		} else {
+			ext = filepath.Ext(base)
+			nameWithoutExt = strings.TrimSuffix(base, ext)
+		}
+
+		// 解析文件名，提取语言代码
+		// yt-dlp 下载的字幕格式通常是：{video_id}.{lang}.{ext}
+		// 例如：-QO7F45J32w.en.srt -> parts = ["-QO7F45J32w", "en"]
+		parts := strings.Split(nameWithoutExt, ".")
+		if len(parts) < 2 {
+			// 如果无法解析，保持原文件名
+			logger.Warn().Str("subtitle_path", subtitlePath).Msg("无法解析字幕文件名格式，保持原文件名")
+			renamedPaths = append(renamedPaths, subtitlePath)
+			continue
+		}
+
+		// 最后一个部分应该是语言代码
+		// 如果格式是 {video_id}.{lang}.frame，则倒数第二个部分是语言代码
+		lang := ""
+		if len(parts) >= 2 {
+			// 检查是否是 .frame 格式
+			if len(parts) >= 3 && parts[len(parts)-1] == "frame" {
+				lang = parts[len(parts)-2]
+			} else {
+				lang = parts[len(parts)-1]
+			}
+		}
+
+		if lang == "" || lang == videoID {
+			// 如果语言代码为空或等于视频ID，说明解析失败
+			logger.Warn().Str("subtitle_path", subtitlePath).Str("lang", lang).Msg("无法提取语言代码，保持原文件名")
+			renamedPaths = append(renamedPaths, subtitlePath)
+			continue
+		}
+
+		// 构建新文件名：{video_id}_{lang}.{ext}
+		// 如果扩展名是 .frame.srt，改为 .srt（因为转换后应该已经是 .srt 格式）
+		finalExt := ext
+		if ext == ".frame.srt" {
+			finalExt = ".srt"
+		}
+		newName := fmt.Sprintf("%s_%s%s", videoID, lang, finalExt)
+		newPath := filepath.Join(videoDir, newName)
+
+		// 如果新文件已存在，先删除
+		if _, err := os.Stat(newPath); err == nil {
+			if err := os.Remove(newPath); err != nil {
+				logger.Warn().Str("path", newPath).Err(err).Msg("删除已存在的字幕文件失败")
+			}
+		}
+
+		// 重命名文件
+		if err := os.Rename(subtitlePath, newPath); err != nil {
+			logger.Warn().
+				Str("old_path", subtitlePath).
+				Str("new_path", newPath).
+				Err(err).
+				Msg("重命名字幕文件失败，保持原文件名")
+			renamedPaths = append(renamedPaths, subtitlePath)
+		} else {
+			logger.Info().
+				Str("old_path", subtitlePath).
+				Str("new_path", newPath).
+				Str("lang", lang).
+				Msg("字幕文件已重命名为 {video_id}_{lang}.{ext} 格式")
+			renamedPaths = append(renamedPaths, newPath)
+		}
+	}
+
+	return renamedPaths
+}
+
+// validateSubtitleOverlap 检查字幕文件中的时间轴重叠，如果发现重叠则自动修复
+func (d *downloader) validateSubtitleOverlap(subtitlePath string) error {
+	// 只检查 SRT 文件
+	if !strings.HasSuffix(strings.ToLower(subtitlePath), ".srt") {
+		return nil
+	}
+
+	// 读取整个文件
+	file, err := os.Open(subtitlePath)
+	if err != nil {
+		return fmt.Errorf("打开字幕文件失败: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("读取字幕文件失败: %w", err)
+	}
+
+	// 时间戳正则：支持毫秒格式 00:00:00,000 --> 00:00:00,000 和帧格式 00:00:00:00 --> 00:00:00:00
+	timePattern := regexp.MustCompile(`(\d{2}):(\d{2}):(\d{2})([,:])(\d{2,3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})([,:])(\d{2,3})`)
+
+	type timeEntry struct {
+		startTime     float64
+		endTime       float64
+		lineIndex     int
+		isMillisecond bool
+		matches       []string
+	}
+
+	var entries []timeEntry
+
+	// 解析所有时间戳
+	for i, line := range lines {
+		if timePattern.MatchString(line) {
+			matches := timePattern.FindStringSubmatch(line)
+			if len(matches) >= 11 {
+				// 解析开始时间
+				startH, _ := strconv.Atoi(matches[1])
+				startM, _ := strconv.Atoi(matches[2])
+				startS, _ := strconv.Atoi(matches[3])
+				startMsOrFrame, _ := strconv.Atoi(matches[5])
+
+				// 解析结束时间
+				endH, _ := strconv.Atoi(matches[6])
+				endM, _ := strconv.Atoi(matches[7])
+				endS, _ := strconv.Atoi(matches[8])
+				endMsOrFrame, _ := strconv.Atoi(matches[10])
+
+				var startTime, endTime float64
+				isMillisecond := matches[4] == ","
+
+				// 判断是毫秒格式还是帧格式
+				if isMillisecond {
+					// 毫秒格式
+					startTime = float64(startH)*3600 + float64(startM)*60 + float64(startS) + float64(startMsOrFrame)/1000.0
+					endTime = float64(endH)*3600 + float64(endM)*60 + float64(endS) + float64(endMsOrFrame)/1000.0
+				} else {
+					// 帧格式（假设30fps）
+					frameRate := 30.0
+					startTime = float64(startH)*3600 + float64(startM)*60 + float64(startS) + float64(startMsOrFrame)/frameRate
+					endTime = float64(endH)*3600 + float64(endM)*60 + float64(endS) + float64(endMsOrFrame)/frameRate
+				}
+
+				entries = append(entries, timeEntry{
+					startTime:     startTime,
+					endTime:       endTime,
+					lineIndex:     i,
+					isMillisecond: isMillisecond,
+					matches:       matches,
+				})
+			}
+		}
+	}
+
+	// 检查并修复重叠
+	hasOverlap := false
+	for i := 0; i < len(entries)-1; i++ {
+		current := &entries[i]
+		next := &entries[i+1]
+
+		// 检查是否重叠：当前条目的结束时间 > 下一个条目的开始时间
+		if current.endTime > next.startTime {
+			hasOverlap = true
+			// 修复重叠：将当前条目的结束时间调整为下一个条目的开始时间减去一个很小的间隔（10毫秒）
+			// 确保至少保留10毫秒的间隔
+			minGap := 0.01 // 10毫秒
+			newEndTime := next.startTime - minGap
+
+			// 确保新的结束时间不早于开始时间
+			if newEndTime <= current.startTime {
+				newEndTime = current.startTime + minGap
+			}
+
+			current.endTime = newEndTime
+
+			// 更新文件中的对应行
+			line := lines[current.lineIndex]
+			newTimeStr := formatTimeRangeForLine(current.startTime, current.endTime, current.isMillisecond)
+			lines[current.lineIndex] = timePattern.ReplaceAllString(line, newTimeStr)
+
+			logger.Info().
+				Str("subtitle_path", subtitlePath).
+				Int("line", current.lineIndex+1).
+				Str("old_time", extractTimeFromLine(line)).
+				Str("new_time", newTimeStr).
+				Msg("自动修复字幕时间轴重叠")
+		}
+	}
+
+	// 如果有重叠并已修复，写回文件
+	if hasOverlap {
+		// 创建备份文件
+		backupPath := subtitlePath + ".backup"
+		if err := copyFile(subtitlePath, backupPath); err != nil {
+			logger.Warn().Err(err).Msg("创建备份文件失败")
+		} else {
+			logger.Info().Str("backup_path", backupPath).Msg("已创建字幕文件备份")
+		}
+
+		// 写回修复后的内容
+		outputFile, err := os.Create(subtitlePath)
+		if err != nil {
+			return fmt.Errorf("创建字幕文件失败: %w", err)
+		}
+		defer outputFile.Close()
+
+		writer := bufio.NewWriter(outputFile)
+		for _, line := range lines {
+			if _, err := writer.WriteString(line + "\n"); err != nil {
+				return fmt.Errorf("写入字幕文件失败: %w", err)
+			}
+		}
+		if err := writer.Flush(); err != nil {
+			return fmt.Errorf("刷新字幕文件失败: %w", err)
+		}
+
+		logger.Info().
+			Str("subtitle_path", subtitlePath).
+			Msg("已自动修复字幕时间轴重叠并保存")
+	}
+
+	return nil
+}
+
+// copyFile 复制文件
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+// extractTimeFromLine 从行中提取时间戳字符串
+func extractTimeFromLine(line string) string {
+	timePattern := regexp.MustCompile(`(\d{2}):(\d{2}):(\d{2})([,:])(\d{2,3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})([,:])(\d{2,3})`)
+	matches := timePattern.FindStringSubmatch(line)
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
+}
+
+// formatTimeRangeForLine 格式化时间范围用于替换行中的时间戳
+func formatTimeRangeForLine(start, end float64, isMillisecond bool) string {
+	startH := int(start) / 3600
+	startM := (int(start) % 3600) / 60
+	startS := int(start) % 60
+
+	endH := int(end) / 3600
+	endM := (int(end) % 3600) / 60
+	endS := int(end) % 60
+
+	if isMillisecond {
+		startMs := int((start - float64(int(start))) * 1000)
+		endMs := int((end - float64(int(end))) * 1000)
+		return fmt.Sprintf("%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d",
+			startH, startM, startS, startMs,
+			endH, endM, endS, endMs)
+	} else {
+		// 帧格式（假设30fps）
+		frameRate := 30.0
+		startFrame := int((start - float64(int(start))) * frameRate)
+		endFrame := int((end - float64(int(end))) * frameRate)
+		return fmt.Sprintf("%02d:%02d:%02d:%02d --> %02d:%02d:%02d:%02d",
+			startH, startM, startS, startFrame,
+			endH, endM, endS, endFrame)
+	}
+}
+
+// formatTimeRange 格式化时间范围用于错误消息
+func formatTimeRange(start, end float64) string {
+	startH := int(start) / 3600
+	startM := (int(start) % 3600) / 60
+	startS := int(start) % 60
+	startMs := int((start - float64(int(start))) * 1000)
+
+	endH := int(end) / 3600
+	endM := (int(end) % 3600) / 60
+	endS := int(end) % 60
+	endMs := int((end - float64(int(end))) * 1000)
+
+	return fmt.Sprintf("%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d",
+		startH, startM, startS, startMs,
+		endH, endM, endS, endMs)
+}
+
+// cleanupFrameSrtFiles 清理旧的 .frame.srt 文件（不再需要帧格式转换）
+func (d *downloader) cleanupFrameSrtFiles(videoDir string) {
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".frame.srt") {
+			frameSrtPath := filepath.Join(videoDir, entry.Name())
+			// 检查是否有对应的 .srt 文件（没有 .frame 后缀）
+			normalSrtName := strings.TrimSuffix(entry.Name(), ".frame.srt") + ".srt"
+			normalSrtPath := filepath.Join(videoDir, normalSrtName)
+
+			// 如果对应的 .srt 文件存在，删除 .frame.srt 文件
+			if _, err := os.Stat(normalSrtPath); err == nil {
+				if err := os.Remove(frameSrtPath); err == nil {
+					logger.Info().
+						Str("frame_srt_path", frameSrtPath).
+						Msg("已清理旧的 .frame.srt 文件")
+				}
+			}
+		}
+	}
 }
