@@ -1,0 +1,5 @@
+./download.go
+./root.go
+./sync.go
+./sync_channel.go
+./upload.go

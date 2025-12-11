@@ -270,7 +270,7 @@ func (u *httpUploader) extractCSRFToken() error {
 	for _, cookie := range u.cookies {
 		if cookie.Name == "csrf" || cookie.Name == "bili_jct" {
 			u.csrfToken = cookie.Value
-			logger.Info().Str("csrf", u.csrfToken[:10]+"...").Msg("已提取 CSRF token")
+			logger.Info().Str("csrf", previewForLog(u.csrfToken, 10)).Msg("已提取 CSRF token")
 			return nil
 		}
 	}
@@ -411,7 +411,7 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 	// 设置 X-Upos-Auth header（如果获取到了）
 	if uposAuth != "" {
 		req.Header.Set("X-Upos-Auth", uposAuth)
-		logger.Debug().Str("x_upos_auth", uposAuth[:50]+"...").Msg("已设置 X-Upos-Auth header")
+		logger.Debug().Str("x_upos_auth", previewForLog(uposAuth, 50)).Msg("已设置 X-Upos-Auth header")
 	} else {
 		logger.Warn().Msg("未设置 X-Upos-Auth header，可能影响上传")
 	}
@@ -684,7 +684,7 @@ func (u *httpUploader) getUposAuth(ctx context.Context, filename string, fileSiz
 	if authVal, ok := preuploadResp["auth"].(string); ok && authVal != "" {
 		// auth 字段中可能包含转义的字符（\u0026 是 &），需要解码
 		auth = strings.ReplaceAll(authVal, "\\u0026", "&")
-		logger.Info().Str("auth", auth[:50]+"...").Msg("从 preupload 响应获取到 auth")
+		logger.Info().Str("auth", previewForLog(auth, 50)).Msg("从 preupload 响应获取到 auth")
 	} else {
 		// 如果没有 auth 字段，记录警告
 		logger.Warn().
@@ -939,6 +939,18 @@ func min(a, b int) int {
 	return b
 }
 
+// previewForLog 返回用于日志预览的字符串，最长 limit 个“字符”（按 rune 截断），超出则追加 "..."
+func previewForLog(s string, limit int) string {
+	if limit <= 0 || s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "..."
+}
+
 // generateHash 生成简单的哈希值（用于字幕文件名）
 func generateHash(input string) string {
 	hash := 0
@@ -1080,7 +1092,7 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 	// 记录发布参数（用于调试）
 	logger.Info().
 		Str("filename", filename).
-		Str("title", title[:50]+"...").
+		Str("title", previewForLog(title, 50)).
 		Str("cover", coverURL).
 		Str("subtitle_url", subtitleURL).
 		Bool("has_subtitle", subtitleURL != "").

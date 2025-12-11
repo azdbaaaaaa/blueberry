@@ -1,0 +1,3 @@
+./subtitle_manager.go
+./youtube_downloader.go
+./youtube_parser.go
