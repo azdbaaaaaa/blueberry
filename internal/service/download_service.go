@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -757,22 +758,7 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		}
 	}
 
-	// ========== 步骤 2: 生成封面图 ==========
-	if videoPath != "" {
-		coverPath := filepath.Join(videoDir, "cover.jpg")
-		if _, err := os.Stat(coverPath); os.IsNotExist(err) {
-			logger.Info().Str("video_id", videoID).Msg("开始生成封面图")
-			if err := s.generateCoverFromVideo(ctx, videoDir, videoPath); err != nil {
-				logger.Warn().Err(err).Msg("生成封面图失败，继续处理其他任务")
-			} else {
-				logger.Info().Str("cover_path", coverPath).Msg("封面图已生成")
-			}
-		} else {
-			logger.Info().Str("cover_path", coverPath).Msg("封面图已存在，跳过生成")
-		}
-	}
-
-	// ========== 步骤 3: 下载字幕 ==========
+	// ========== 步骤 2: 下载字幕 ==========
 	subtitlesDownloaded := s.fileManager.IsSubtitlesDownloaded(videoDir, languages)
 	subtitleMap := make(map[string]string) // 用于保存视频信息
 	if !subtitlesDownloaded {
@@ -837,9 +823,12 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		}
 	}
 
-	// ========== 步骤 4: 下载缩略图 ==========
+	// ========== 步骤 3: 下载缩略图并设置为封面图 ==========
 	thumbnailDownloaded := s.fileManager.IsThumbnailDownloaded(videoDir)
 	thumbnails := s.buildThumbnailsFromRawData(rawData) // 用于保存视频信息
+	coverPath := filepath.Join(videoDir, "cover.jpg")
+	hasCover := false
+
 	if !thumbnailDownloaded {
 		logger.Info().Str("video_id", videoID).Msg("开始下载缩略图")
 
@@ -858,10 +847,54 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			} else {
 				logger.Info().Str("thumbnail_path", thumbnailPath).Msg("缩略图下载完成")
 				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, "thumbnail", "completed", thumbnailPath)
+
+				// 将缩略图复制为封面图
+				if err := s.copyFile(thumbnailPath, coverPath); err != nil {
+					logger.Warn().Err(err).Msg("复制缩略图为封面图失败")
+				} else {
+					logger.Info().
+						Str("cover_path", coverPath).
+						Str("thumbnail_path", thumbnailPath).
+						Msg("缩略图已复制为封面图")
+					hasCover = true
+				}
 			}
 		}
 	} else {
 		logger.Info().Str("video_id", videoID).Msg("缩略图已下载，跳过")
+		// 检查缩略图是否存在，如果存在则复制为封面图
+		thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
+		if _, err := os.Stat(thumbnailPath); err == nil {
+			// 如果封面图不存在，复制缩略图为封面图
+			if _, err := os.Stat(coverPath); os.IsNotExist(err) {
+				if err := s.copyFile(thumbnailPath, coverPath); err != nil {
+					logger.Warn().Err(err).Msg("复制缩略图为封面图失败")
+				} else {
+					logger.Info().
+						Str("cover_path", coverPath).
+						Str("thumbnail_path", thumbnailPath).
+						Msg("缩略图已复制为封面图")
+					hasCover = true
+				}
+			} else {
+				hasCover = true
+				logger.Info().Str("cover_path", coverPath).Msg("封面图已存在")
+			}
+		}
+	}
+
+	// 如果没有封面图（缩略图下载失败或不存在），且视频已下载，则从视频首帧生成封面图
+	if !hasCover && videoPath != "" {
+		if _, err := os.Stat(coverPath); os.IsNotExist(err) {
+			logger.Info().Str("video_id", videoID).Msg("缩略图不存在，开始从视频首帧生成封面图")
+			if err := s.generateCoverFromVideo(ctx, videoDir, videoPath); err != nil {
+				logger.Warn().Err(err).Msg("生成封面图失败，继续处理其他任务")
+			} else {
+				logger.Info().Str("cover_path", coverPath).Msg("封面图已从视频首帧生成")
+			}
+		} else {
+			logger.Info().Str("cover_path", coverPath).Msg("封面图已存在，跳过生成")
+		}
 	}
 
 	// ========== 步骤 5: 保存视频信息 ==========
@@ -1130,4 +1163,26 @@ func (s *downloadService) buildVideoInfoFromRawData(
 	}
 
 	return videoInfo
+}
+
+// copyFile 复制文件
+func (s *downloadService) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("打开源文件失败: %w", err)
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("创建目标文件失败: %w", err)
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return fmt.Errorf("复制文件失败: %w", err)
+	}
+
+	return nil
 }

@@ -76,14 +76,21 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		// 不返回错误，继续尝试上传
 	}
 
-	// 0. 在开始上传前检查所需文件是否存在
+	// 0. 清理路径中的转义字符（处理 shell 转义）
+	videoPath = u.cleanPath(videoPath)
+	for i := range subtitlePaths {
+		subtitlePaths[i] = u.cleanPath(subtitlePaths[i])
+	}
+
+	// 1. 在开始上传前检查所需文件是否存在
 	videoDir := filepath.Dir(videoPath)
-	if err := u.validateRequiredFiles(videoPath, subtitlePaths, videoDir); err != nil {
+	actualVideoPath, err := u.validateRequiredFiles(videoPath, subtitlePaths, videoDir)
+	if err != nil {
 		return nil, fmt.Errorf("文件检查失败: %w", err)
 	}
 
-	// 1. 上传视频
-	filename, err := u.uploadVideo(ctx, videoPath)
+	// 2. 上传视频（使用实际找到的文件路径）
+	filename, err := u.uploadVideo(ctx, actualVideoPath)
 	if err != nil {
 		return nil, fmt.Errorf("上传视频失败: %w", err)
 	}
@@ -1170,19 +1177,47 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 }
 
 // validateRequiredFiles 在开始上传前检查所需文件是否存在
-func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []string, videoDir string) error {
+// 返回实际找到的视频文件路径
+func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []string, videoDir string) (string, error) {
 	// 1. 检查视频文件（必需）
+	// 先尝试直接使用提供的路径
+	actualVideoPath := videoPath
 	if _, err := os.Stat(videoPath); err != nil {
-		return fmt.Errorf("视频文件不存在: %s, 错误: %w", videoPath, err)
+		// 如果文件不存在，尝试在 videoDir 中查找视频文件（可能是文件名不完全匹配）
+		if videoDir != "" {
+			// 查找 videoDir 中的所有视频文件
+			entries, readErr := os.ReadDir(videoDir)
+			if readErr == nil {
+				for _, entry := range entries {
+					if !entry.IsDir() && (strings.HasSuffix(strings.ToLower(entry.Name()), ".mp4") ||
+						strings.HasSuffix(strings.ToLower(entry.Name()), ".mkv") ||
+						strings.HasSuffix(strings.ToLower(entry.Name()), ".webm")) {
+						// 找到视频文件，使用实际的文件名
+						foundPath := filepath.Join(videoDir, entry.Name())
+						logger.Info().
+							Str("original_path", videoPath).
+							Str("found_path", foundPath).
+							Msg("在目录中找到视频文件（文件名可能不完全匹配）")
+						actualVideoPath = foundPath
+						break
+					}
+				}
+			}
+		}
+		// 再次检查
+		if _, err := os.Stat(actualVideoPath); err != nil {
+			return "", fmt.Errorf("视频文件不存在: %s (尝试查找后: %s), 错误: %w", videoPath, actualVideoPath, err)
+		}
 	}
-	logger.Info().Str("video_path", videoPath).Msg("✓ 视频文件存在")
+	logger.Info().Str("video_path", actualVideoPath).Msg("✓ 视频文件存在")
 
 	// 2. 检查字幕文件（如果提供了路径）
-	for _, subtitlePath := range subtitlePaths {
-		if _, err := os.Stat(subtitlePath); err != nil {
-			return fmt.Errorf("字幕文件不存在: %s, 错误: %w", subtitlePath, err)
+	for i, subtitlePath := range subtitlePaths {
+		subtitlePaths[i] = u.cleanPath(subtitlePath)
+		if _, err := os.Stat(subtitlePaths[i]); err != nil {
+			return "", fmt.Errorf("字幕文件不存在: %s, 错误: %w", subtitlePaths[i], err)
 		}
-		logger.Debug().Str("subtitle_path", subtitlePath).Msg("✓ 字幕文件存在")
+		logger.Debug().Str("subtitle_path", subtitlePaths[i]).Msg("✓ 字幕文件存在")
 	}
 	if len(subtitlePaths) > 0 {
 		logger.Info().Int("count", len(subtitlePaths)).Msg("✓ 所有字幕文件存在")
@@ -1208,7 +1243,7 @@ func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []s
 	}
 
 	logger.Info().Msg("文件检查完成，所有必需文件都存在，可以开始上传")
-	return nil
+	return actualVideoPath, nil
 }
 
 // generateFilename 生成上传文件名
@@ -1222,4 +1257,20 @@ func generateFilename(originalName string) string {
 		ext = ".mp4"
 	}
 	return fmt.Sprintf("n%sad%s%s", timestamp, random, ext)
+}
+
+// cleanPath 清理路径中的转义字符
+// 处理 shell 转义，例如：\  -> 空格，\# -> #，\\ -> \
+func (u *httpUploader) cleanPath(path string) string {
+	// 替换常见的转义字符
+	// \  -> 空格
+	// \# -> #
+	// \" -> "
+	// \' -> '
+	cleaned := strings.ReplaceAll(path, "\\ ", " ")
+	cleaned = strings.ReplaceAll(cleaned, "\\#", "#")
+	cleaned = strings.ReplaceAll(cleaned, "\\\"", "\"")
+	cleaned = strings.ReplaceAll(cleaned, "\\'", "'")
+
+	return cleaned
 }

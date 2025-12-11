@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"blueberry/internal/config"
 	"blueberry/internal/repository/bilibili"
@@ -75,7 +76,17 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 	}
 
 	videoDir := filepath.Dir(videoPath)
-	subtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
+	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
+	// 优先选择英文字幕
+	subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
+	if len(subtitlePaths) == 0 {
+		// 如果没有英文字幕，使用所有字幕
+		subtitlePaths = allSubtitlePaths
+	}
+	logger.Info().
+		Int("total_subtitles", len(allSubtitlePaths)).
+		Int("selected_subtitles", len(subtitlePaths)).
+		Msg("字幕文件选择完成")
 	videoTitle := s.fileManager.ExtractVideoTitleFromFile(videoPath)
 
 	logger.Info().Str("video_path", videoPath).Str("title", videoTitle).Msg("开始上传视频")
@@ -199,7 +210,17 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
-		subtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
+		allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
+		// 优先选择英文字幕
+		subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
+		if len(subtitlePaths) == 0 {
+			// 如果没有英文字幕，使用所有字幕
+			subtitlePaths = allSubtitlePaths
+		}
+		logger.Info().
+			Int("total_subtitles", len(allSubtitlePaths)).
+			Int("selected_subtitles", len(subtitlePaths)).
+			Msg("字幕文件选择完成")
 
 		// 使用 title 或从文件提取
 		videoTitle := title
@@ -285,6 +306,29 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 	}
 
 	return nil
+}
+
+// filterEnglishSubtitles 从字幕文件列表中筛选出英文字幕
+// 优先匹配 "en"、"en-US"、"en-GB" 等英语变体
+func (s *uploadService) filterEnglishSubtitles(subtitlePaths []string) []string {
+	var englishSubtitles []string
+	for _, path := range subtitlePaths {
+		base := filepath.Base(path)
+		ext := filepath.Ext(base)
+		name := strings.TrimSuffix(base, ext)
+
+		// 检查文件名中是否包含英语标识
+		// 匹配模式：.en.、.en-US.、.en-GB.、-en.、-en-US. 等
+		if strings.Contains(name, ".en.") ||
+			strings.Contains(name, ".en-") ||
+			strings.Contains(name, "-en.") ||
+			strings.Contains(name, "-en-") ||
+			strings.HasSuffix(name, ".en") ||
+			strings.HasSuffix(name, "-en") {
+			englishSubtitles = append(englishSubtitles, path)
+		}
+	}
+	return englishSubtitles
 }
 
 func (s *uploadService) UploadAllChannels(ctx context.Context) error {

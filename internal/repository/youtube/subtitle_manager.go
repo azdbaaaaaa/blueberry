@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"blueberry/pkg/logger"
 )
 
 type SubtitleManager interface {
@@ -146,20 +148,48 @@ func (s *subtitleManager) RenameSubtitlesForAID(subtitlePaths []string, aid stri
 	renamedPaths := make([]string, 0, len(subtitlePaths))
 
 	for _, subtitlePath := range subtitlePaths {
-		lang := s.extractLanguageFromSubtitleFile(subtitlePath)
+		// 获取原始字幕文件路径（如果是 .frame.srt，需要找到原始文件）
+		originalPath := subtitlePath
+		if strings.Contains(filepath.Base(subtitlePath), ".frame.srt") {
+			// 如果是帧格式文件，尝试找到原始文件
+			originalPath = strings.Replace(subtitlePath, ".frame.srt", ".srt", 1)
+			// 如果原始文件不存在，使用当前文件
+			if _, err := os.Stat(originalPath); err != nil {
+				originalPath = subtitlePath
+			}
+		}
+
+		lang := s.extractLanguageFromSubtitleFile(originalPath)
 		if lang == "" {
 			lang = "unknown"
 		}
 
-		ext := filepath.Ext(subtitlePath)
+		ext := filepath.Ext(originalPath)
+		// 生成新文件名：{aid}_{lang}.srt
 		newName := fmt.Sprintf("%s_%s%s", aid, lang, ext)
-		newPath := filepath.Join(outputDir, newName)
+		// 新文件保存在视频目录中（原始文件的目录）
+		videoDir := filepath.Dir(originalPath)
+		newPath := filepath.Join(videoDir, newName)
 
-		if err := s.copyFile(subtitlePath, newPath); err != nil {
+		// 如果目标文件已存在，先删除
+		if _, err := os.Stat(newPath); err == nil {
+			if err := os.Remove(newPath); err != nil {
+				logger.Warn().Str("path", newPath).Err(err).Msg("删除已存在的字幕文件失败")
+			}
+		}
+
+		// 复制原始文件到新路径，保留原文件
+		if err := s.copyFile(originalPath, newPath); err != nil {
 			return nil, fmt.Errorf("复制字幕文件失败: %w", err)
 		}
 
 		renamedPaths = append(renamedPaths, newPath)
+		logger.Info().
+			Str("original", originalPath).
+			Str("copied_to", newPath).
+			Str("aid", aid).
+			Str("lang", lang).
+			Msg("原始字幕文件已复制为新名称（原文件保留）")
 	}
 
 	return renamedPaths, nil

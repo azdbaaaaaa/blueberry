@@ -91,6 +91,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				result.SubtitlePaths = subtitleFiles
 				// 如果下载的是 VTT 格式，尝试转换为 SRT
 				result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
+				// 将毫秒格式的 SRT 转换为帧格式（保存到新文件）
+				result.SubtitlePaths = d.convertSRTToFrameFormatIfNeeded(videoDir, result.SubtitlePaths)
 			}
 
 			result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
@@ -314,6 +316,50 @@ func (d *downloader) convertVTTToSRTIfNeeded(videoDir string, subtitlePaths []st
 		logger.Info().
 			Int("converted_count", len(convertedPaths)).
 			Msg("已使用纯 Go 实现将 VTT 转换为 SRT（无需 ffmpeg）")
+	}
+
+	return convertedPaths
+}
+
+// convertSRTToFrameFormatIfNeeded 如果需要，将毫秒格式的 SRT 转换为帧格式（保存到新文件）
+func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePaths []string) []string {
+	var convertedPaths []string
+	var hasConverted bool
+
+	for _, path := range subtitlePaths {
+		if strings.HasSuffix(strings.ToLower(path), ".srt") {
+			// 检查是否是毫秒格式
+			if subtitle.IsMillisecondFormat(path) {
+				// 转换为帧格式（保存到新文件，文件名添加 .frame 后缀）
+				frameSrtPath, err := subtitle.ConvertSRTToFrameFormat(path, 30.0)
+				if err != nil {
+					logger.Warn().
+						Str("srt_path", path).
+						Err(err).
+						Msg("转换 SRT 为帧格式失败，保留原文件")
+					convertedPaths = append(convertedPaths, path)
+				} else {
+					logger.Info().
+						Str("original_path", path).
+						Str("frame_path", frameSrtPath).
+						Msg("毫秒格式 SRT 已转换为帧格式（保存到新文件）")
+					convertedPaths = append(convertedPaths, frameSrtPath)
+					hasConverted = true
+				}
+			} else {
+				// 已经是帧格式，直接添加
+				convertedPaths = append(convertedPaths, path)
+			}
+		} else {
+			// 其他格式，直接添加
+			convertedPaths = append(convertedPaths, path)
+		}
+	}
+
+	if hasConverted {
+		logger.Info().
+			Int("converted_count", len(convertedPaths)).
+			Msg("已将毫秒格式 SRT 转换为帧格式")
 	}
 
 	return convertedPaths
