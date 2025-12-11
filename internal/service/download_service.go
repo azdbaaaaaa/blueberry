@@ -1139,15 +1139,27 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 		ext = ".jpg"
 	}
 
-	// 直接下载为 cover.{ext} 格式
+	// 直接下载为 cover.{ext} 格式（优先尝试按 URL 扩展名的格式获取）
 	coverPath := filepath.Join(videoDir, "cover"+ext)
 
 	// 先下载到临时文件，然后检测实际文件类型
 	tempPath := filepath.Join(videoDir, "cover_temp"+ext)
-	cmd := exec.CommandContext(ctx, "curl", "-L", "-o", tempPath, thumbnail.URL)
+	// 根据目标扩展名设置 Accept
+	accept := "*/*"
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg":
+		accept = "image/jpeg"
+	case ".png":
+		accept = "image/png"
+	case ".gif":
+		accept = "image/gif"
+	case ".webp":
+		accept = "image/webp"
+	}
+	cmd := exec.CommandContext(ctx, "curl", "-L", "-H", "Accept: "+accept, "-o", tempPath, thumbnail.URL)
 	if err := cmd.Run(); err != nil {
 		// 如果 curl 失败，尝试使用 wget
-		cmd = exec.CommandContext(ctx, "wget", "-O", tempPath, thumbnail.URL)
+		cmd = exec.CommandContext(ctx, "wget", "--header=Accept: "+accept, "-O", tempPath, thumbnail.URL)
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("下载缩略图失败: %w", err)
 		}
@@ -1155,18 +1167,42 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 
 	// 检测实际文件类型
 	actualExt := s.detectImageExtension(tempPath)
-	if actualExt != ext {
-		// 如果检测到的扩展名与从 URL 提取的不同，使用检测到的扩展名
-		newCoverPath := filepath.Join(videoDir, "cover"+actualExt)
-		if err := os.Rename(tempPath, newCoverPath); err != nil {
-			// 如果重命名失败，删除临时文件
-			os.Remove(tempPath)
-			return "", fmt.Errorf("重命名缩略图失败: %w", err)
+	if strings.ToLower(actualExt) != strings.ToLower(ext) {
+		// 目标为 URL 指定的扩展；若返回类型不同，尝试转码为目标扩展
+		targetPath := coverPath
+		// 优先使用 ffmpeg 转码为目标格式（仅常见格式）
+		if _, err := exec.LookPath("ffmpeg"); err == nil {
+			// 构建 ffmpeg 转码参数
+			args := []string{"-y", "-i", tempPath}
+			switch strings.ToLower(ext) {
+			case ".jpg", ".jpeg":
+				args = append(args, "-q:v", "2")
+			}
+			args = append(args, targetPath)
+			if out, convErr := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); convErr != nil {
+				// 转码失败则回退为直接重命名到实际扩展
+				logger.Warn().Err(convErr).Str("output", string(out)).Str("from", actualExt).Str("to", ext).Msg("封面转码失败，回退为实际格式")
+				fallbackPath := filepath.Join(videoDir, "cover"+actualExt)
+				_ = os.Rename(tempPath, fallbackPath)
+				coverPath = fallbackPath
+				ext = actualExt
+			} else {
+				// 转码成功
+				_ = os.Remove(tempPath)
+			}
+		} else {
+			// 无转码工具，直接按实际格式保存
+			logger.Warn().Str("desired_ext", ext).Str("actual_ext", actualExt).Msg("未检测到 ffmpeg，按实际格式保存封面图")
+			fallbackPath := filepath.Join(videoDir, "cover"+actualExt)
+			if err := os.Rename(tempPath, fallbackPath); err != nil {
+				os.Remove(tempPath)
+				return "", fmt.Errorf("重命名缩略图失败: %w", err)
+			}
+			coverPath = fallbackPath
+			ext = actualExt
 		}
-		coverPath = newCoverPath
-		ext = actualExt
 	} else {
-		// 如果扩展名正确，直接重命名
+		// 如果扩展名与目标一致，直接重命名
 		if err := os.Rename(tempPath, coverPath); err != nil {
 			os.Remove(tempPath)
 			return "", fmt.Errorf("重命名缩略图失败: %w", err)
