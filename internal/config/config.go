@@ -21,6 +21,8 @@ type BilibiliConfig struct {
 	CookiesFromBrowser string `mapstructure:"cookies_from_browser"` // 从浏览器导入 cookies（仅本地开发环境使用）
 	CookiesFile        string `mapstructure:"cookies_file"`         // Cookies 文件路径（Netscape 格式或 JSON 格式，推荐用于服务器环境）
 	UploadMethod       string `mapstructure:"upload_method"`        // 上传方式：http（纯HTTP，推荐）或 chromedp（浏览器自动化，需要浏览器）
+	// 上传成功后是否删除本地原视频文件（仅删除视频，不删除字幕/元数据）
+	DeleteOriginalAfterUpload bool `mapstructure:"delete_original_after_upload"`
 }
 
 type YouTubeChannel struct {

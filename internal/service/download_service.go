@@ -453,6 +453,12 @@ func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *
 
 // generatePendingDownloads 生成待下载资源状态文件
 func (s *downloadService) generatePendingDownloads(channelID, channelURL string, videoMaps []map[string]interface{}, languages []string) error {
+	// 生成开始日志（大频道可能耗时较长）
+	logger.Info().
+		Str("channel_id", channelID).
+		Int("total_videos", len(videoMaps)).
+		Msg("开始生成待下载状态文件（pending_downloads.json）")
+
 	pending := &file.PendingDownloads{
 		ChannelID:   channelID,
 		ChannelURL:  channelURL,
@@ -460,7 +466,7 @@ func (s *downloadService) generatePendingDownloads(channelID, channelURL string,
 		Videos:      make([]file.PendingVideoDownload, 0, len(videoMaps)),
 	}
 
-	for _, videoMap := range videoMaps {
+	for i, videoMap := range videoMaps {
 		videoID, _ := videoMap["id"].(string)
 		title, _ := videoMap["title"].(string)
 		url, _ := videoMap["url"].(string)
@@ -555,9 +561,31 @@ func (s *downloadService) generatePendingDownloads(channelID, channelURL string,
 		}
 
 		pending.Videos = append(pending.Videos, pendingVideo)
+
+		// 进度日志（避免刷屏，按批次打印）
+		if (i+1)%500 == 0 || i == len(videoMaps)-1 {
+			logger.Info().
+				Str("channel_id", channelID).
+				Int("current", i+1).
+				Int("total", len(videoMaps)).
+				Msg("生成待下载状态进度")
+		}
 	}
 
-	return s.fileManager.SavePendingDownloads(channelID, pending)
+	if err := s.fileManager.SavePendingDownloads(channelID, pending); err != nil {
+		return err
+	}
+
+	// 完成日志
+	channelDir, _ := s.fileManager.EnsureChannelDir(channelID)
+	statusFile := filepath.Join(channelDir, "pending_downloads.json")
+	logger.Info().
+		Str("channel_id", channelID).
+		Str("status_file", statusFile).
+		Int("video_count", len(pending.Videos)).
+		Msg("待下载状态文件生成完成")
+
+	return nil
 }
 
 // ParseChannels 解析配置文件中所有频道并保存视频列表信息到目录下
@@ -690,6 +718,15 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		if err != nil {
 			return fmt.Errorf("创建视频目录失败: %w", err)
 		}
+	}
+
+	// 如果已上传，直接跳过（不再重新下载）
+	if s.fileManager.IsVideoUploaded(videoDir) {
+		logger.Info().
+			Str("video_id", videoID).
+			Str("video_dir", videoDir).
+			Msg("视频已上传，跳过下载与处理")
+		return nil
 	}
 
 	// ========== 步骤 1: 下载视频 ==========

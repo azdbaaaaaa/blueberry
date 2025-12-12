@@ -150,6 +150,14 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 				Str("video_dir", videoDir).
 				Msg("上传状态已保存到 upload_status.json，下次运行将自动跳过此视频")
 		}
+		// 按配置删除本地原视频文件
+		if s.cfg.Bilibili.DeleteOriginalAfterUpload {
+			if err := os.Remove(videoFile); err != nil {
+				logger.Warn().Err(err).Str("video_file", videoFile).Msg("删除本地原视频文件失败")
+			} else {
+				logger.Info().Str("video_file", videoFile).Msg("已删除本地原视频文件（按配置）")
+			}
+		}
 
 		// 重命名字幕文件
 		if len(subtitlePaths) > 0 {
