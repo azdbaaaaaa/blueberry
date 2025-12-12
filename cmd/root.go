@@ -29,11 +29,10 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "配置文件路径 (默认: ./config.yaml)")
-	
+
 	rootCmd.AddCommand(downloadCmd)
 	rootCmd.AddCommand(uploadCmd)
-	rootCmd.AddCommand(syncCmd)
-	rootCmd.AddCommand(syncChannelCmd)
+	rootCmd.AddCommand(channelCmd)
 }
 
 func initConfig() {
@@ -61,4 +60,3 @@ func initConfig() {
 		os.Exit(1)
 	}
 }
-

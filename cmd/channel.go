@@ -13,10 +13,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var syncChannelCmd = &cobra.Command{
-	Use:   "sync-channel",
-	Short: "同步频道信息",
-	Long:  `解析配置文件中所有YouTube频道并保存视频列表信息到目录下`,
+var channelCmd = &cobra.Command{
+	Use:   "channel",
+	Short: "解析/同步频道信息",
+	Long:  `解析配置文件中所有YouTube频道并保存视频列表信息到目录下（生成 channel_info.json）。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Get()
 		if cfg == nil {
@@ -44,6 +44,5 @@ var syncChannelCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(syncChannelCmd)
+	rootCmd.AddCommand(channelCmd)
 }
-
