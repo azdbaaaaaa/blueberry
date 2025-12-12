@@ -14,6 +14,8 @@ type Config struct {
 	Subtitles        SubtitlesConfig    `mapstructure:"subtitles"`
 	Output           OutputConfig       `mapstructure:"output"`
 	YouTube          YouTubeConfig      `mapstructure:"youtube"`
+	Logging          LoggingConfig      `mapstructure:"logging"`
+	Channel          ChannelConfig      `mapstructure:"channel"`
 }
 
 type BilibiliConfig struct {
@@ -55,9 +57,44 @@ type YouTubeConfig struct {
 	CookiesFile string `mapstructure:"cookies_file"`
 }
 
+// LoggingConfig 控制日志级别与输出路径
+type LoggingConfig struct {
+	// Level: debug/info/warn/error
+	Level string `mapstructure:"level"`
+	// FilePath: 可选，所有级别写入同一个文件（与下方 stdout/stderr 二选一）
+	FilePath string `mapstructure:"file_path"`
+	// StdoutPath: 普通日志输出文件（可选）
+	StdoutPath string `mapstructure:"stdout_path"`
+	// StderrPath: 错误日志输出文件（可选）
+	StderrPath string `mapstructure:"stderr_path"`
+	// Rotate: 日志滚动策略（使用 lumberjack）
+	Rotate LogRotateConfig `mapstructure:"rotate"`
+}
+
+// LogRotateConfig 日志滚动参数（配合 lumberjack 使用）
+type LogRotateConfig struct {
+	// 单个日志文件最大尺寸（MB），默认 100
+	MaxSizeMB int `mapstructure:"max_size_mb"`
+	// 最多保留的旧文件个数，默认 7
+	MaxBackups int `mapstructure:"max_backups"`
+	// 最多保留的天数，默认 30
+	MaxAgeDays int `mapstructure:"max_age_days"`
+	// 是否压缩旧日志，默认 true
+	Compress bool `mapstructure:"compress"`
+}
+
+// ChannelConfig 控制频道解析行为
+type ChannelConfig struct {
+	// 是否在解析后生成 pending_downloads.json（扫描本地状态，可能较慢），默认 true
+	GeneratePendingDownloads bool `mapstructure:"generate_pending_downloads"`
+}
+
 var globalConfig *Config
 
 func Load(configPath string) (*Config, error) {
+	// 默认值
+	viper.SetDefault("channel.generate_pending_downloads", false)
+
 	if configPath != "" {
 		viper.SetConfigFile(configPath)
 	} else {

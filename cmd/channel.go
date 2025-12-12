@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var channelNoPending bool
+
 var channelCmd = &cobra.Command{
 	Use:   "channel",
 	Short: "解析/同步频道信息",
@@ -22,6 +24,11 @@ var channelCmd = &cobra.Command{
 		if cfg == nil {
 			fmt.Fprintf(os.Stderr, "配置未加载\n")
 			os.Exit(1)
+		}
+
+		// 允许通过命令行跳过 pending 生成（覆盖配置）
+		if channelNoPending {
+			cfg.Channel.GeneratePendingDownloads = false
 		}
 
 		application, err := app.NewApp(cfg)
@@ -45,4 +52,5 @@ var channelCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(channelCmd)
+	channelCmd.Flags().BoolVar(&channelNoPending, "no-pending", false, "跳过生成 pending_downloads.json（大频道可显著加速）")
 }

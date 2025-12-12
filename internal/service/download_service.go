@@ -281,17 +281,21 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 		Int("video_count", len(videos)).
 		Msg("频道信息已保存")
 
-	// 生成待下载状态文件（在解析后立即生成，方便查看）
-	languages := s.getChannelLanguages(channel)
-	if err := s.generatePendingDownloads(realChannelID, channel.URL, videoMaps, languages); err != nil {
-		logger.Warn().Err(err).Msg("生成待下载状态文件失败")
+	// 可选：生成待下载状态文件（可能较慢）
+	if s.cfg.Channel.GeneratePendingDownloads {
+		languages := s.getChannelLanguages(channel)
+		if err := s.generatePendingDownloads(realChannelID, channel.URL, videoMaps, languages); err != nil {
+			logger.Warn().Err(err).Msg("生成待下载状态文件失败")
+		} else {
+			channelDir, _ := s.fileManager.EnsureChannelDir(realChannelID)
+			statusFile := filepath.Join(channelDir, "pending_downloads.json")
+			logger.Info().
+				Str("channel_id", realChannelID).
+				Str("status_file", statusFile).
+				Msg("待下载状态文件已生成")
+		}
 	} else {
-		channelDir, _ := s.fileManager.EnsureChannelDir(realChannelID)
-		statusFile := filepath.Join(channelDir, "pending_downloads.json")
-		logger.Info().
-			Str("channel_id", realChannelID).
-			Str("status_file", statusFile).
-			Msg("待下载状态文件已生成")
+		logger.Info().Str("channel_id", realChannelID).Msg("按配置跳过生成待下载状态文件")
 	}
 
 	return nil

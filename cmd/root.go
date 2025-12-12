@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"blueberry/internal/config"
+	"blueberry/pkg/logger"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -59,5 +60,10 @@ func initConfig() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
+	}
+	// 根据配置设置日志
+	cfg := config.Get()
+	if cfg != nil {
+		logger.Init(cfg.Logging)
 	}
 }

@@ -7,9 +7,10 @@
 - 📥 从YouTube频道页面批量下载视频
 - 🌐 支持多语言字幕下载（可配置语言列表或下载全部）
 - 📤 自动上传视频到B站海外版（bilibili.tv）
-- 🔄 支持一键同步（下载+上传）
+- 🔄 支持一键同步（下载+上传），可逐个视频顺序执行
 - ⚙️ 基于YAML的灵活配置
 - 🎯 支持为不同频道指定不同的B站账号
+ - 🧰 AWS EC2（Amazon Linux）一键部署脚本（Makefile）
 
 ## 前置要求
 
@@ -45,6 +46,8 @@ cp config.yaml.example config.yaml
 ```yaml
 bilibili:
   base_url: "https://www.bilibili.tv/en/"
+  # 上传成功后是否删除本地原视频文件（仅删除视频，不删除字幕/元数据）
+  delete_original_after_upload: false
 
 youtube_channels:
   - url: "https://www.youtube.com/@example/videos"
@@ -67,6 +70,25 @@ subtitles:
 
 output:
   directory: "./downloads"
+
+logging:
+  # 可选：debug | info | warn | error
+  level: "info"
+  # 可选：所有级别写入同一个文件（与下方 stdout/stderr 二选一）
+  file_path: ""
+  # 可选：输出文件路径（Linux 推荐使用 /var/log/blueberry/）
+  stdout_path: "/var/log/blueberry/out.log"
+  stderr_path: "/var/log/blueberry/err.log"
+  # 滚动策略（lumberjack）
+  rotate:
+    max_size_mb: 100
+    max_backups: 7
+    max_age_days: 30
+    compress: true
+
+channel:
+  # 是否在解析后生成 pending_downloads.json（扫描本地状态，可能较慢）
+  generate_pending_downloads: false
 ```
 
 ### 配置说明
@@ -117,9 +139,11 @@ output:
 
 ### 同步（下载+上传）
 
-一键执行下载和上传流程：
+逐个视频“下载→上传”的顺序同步（推荐）：
 ```bash
-./blueberry sync
+./blueberry sync --channel "https://www.youtube.com/@example/videos"
+# 或全量：
+./blueberry sync --all
 ```
 
 ## 命令说明
@@ -140,10 +164,52 @@ output:
 - `--account`: B站账号名称（必需）
 
 ### `sync`
-一键执行下载和上传流程。
+逐个视频执行“下载→上传”的顺序同步，避免批量下载后统一上传导致的空间/状态不一致问题。
 
+### `channel`
+解析/同步频道信息。
+支持跳过生成 pending（适合超大频道）：
+```bash
+./blueberry channel --no-pending
+```
 ### `list`
 列出配置中的频道、账号等信息。
+
+## 部署（AWS EC2 - Amazon Linux）
+
+### 1) 准备实例
+- 选择 Amazon Linux（推荐 2023 或 Amazon Linux 2）
+- 安全组开放 SSH，出站网络允许 HTTP/HTTPS
+
+### 2) 克隆与构建
+```bash
+git clone <repository-url>
+cd blueberry
+make deps       # 安装 yt-dlp / ffmpeg 等依赖
+make build      # 构建 Linux 可执行文件
+```
+
+### 3) 安装与后台运行
+```bash
+sudo mkdir -p /var/log/blueberry
+# 可选：在 config.yaml 中设置 logging.stdout_path / logging.stderr_path
+make install
+make start      # 后台运行（nohup），日志写 /var/log/blueberry/{out,err}.log
+```
+
+### 4) 日志与停止
+```bash
+make logs       # 跟随日志
+make stop       # 停止运行
+```
+
+提示：
+- 若希望上传成功后删除本地视频，请在 `config.yaml` 设置：
+  ```yaml
+  bilibili:
+    delete_original_after_upload: true
+  ```
+- 程序将按 `logging.level` 设置日志级别，并按路径将 Info/Debug 输出到 stdout_path，Warn/Error 输出到 stderr_path。
 
 ## 文件结构
 
