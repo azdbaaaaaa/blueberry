@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"time"
 
 	"blueberry/internal/app"
 	"blueberry/internal/config"
@@ -93,8 +95,15 @@ var syncCmd = &cobra.Command{
 					continue
 				}
 
+				// 选择可用账号（随机），按每日上限过滤
+				accountName, ok := selectAvailableAccount(cfg, fileRepo)
+				if !ok {
+					logger.Error().Msg("没有可用的B站账号（当日额度已用尽），终止后续处理")
+					return fmt.Errorf("no available bilibili account today")
+				}
+				logger.Info().Str("account", accountName).Msg("选择上传账号")
 				// 立即上传该视频
-				if err := application.UploadService.UploadSingleVideo(ctx, videoDir, ch.BilibiliAccount); err != nil {
+				if err := application.UploadService.UploadSingleVideo(ctx, videoDir, accountName); err != nil {
 					logger.Error().Err(err).Str("video_dir", videoDir).Msg("上传该视频失败，继续下一个")
 					continue
 				}
@@ -134,4 +143,38 @@ func init() {
 	syncCmd.Flags().StringVar(&serialChannelURL, "channel", "", "要顺序同步的频道URL")
 	syncCmd.Flags().BoolVar(&serialAll, "all", false, "顺序同步配置中所有频道")
 	rootCmd.AddCommand(syncCmd)
+}
+
+// selectAvailableAccount 从配置中随机选择当日未达上限的账号
+func selectAvailableAccount(cfg *config.Config, repo file.Repository) (string, bool) {
+	// 收集账号名
+	names := make([]string, 0, len(cfg.BilibiliAccounts))
+	for name := range cfg.BilibiliAccounts {
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	// 读取当日计数
+	counts, err := repo.LoadTodayUploadCounts()
+	if err != nil {
+		counts = map[string]int{}
+	}
+	limit := cfg.Bilibili.DailyUploadLimit
+	if limit <= 0 {
+		limit = 160
+	}
+	// 过滤可用列表
+	available := make([]string, 0, len(names))
+	for _, n := range names {
+		if counts[n] < limit {
+			available = append(available, n)
+		}
+	}
+	if len(available) == 0 {
+		return "", false
+	}
+	// 随机选择一个
+	rand.Seed(time.Now().UnixNano())
+	return available[rand.Intn(len(available))], true
 }

@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+type uploadCounters struct {
+	Date   string         `json:"date"`
+	Counts map[string]int `json:"counts"`
+}
+
 func shortenErrorMessage(msg string) string {
 	s := strings.TrimSpace(msg)
 	if s == "" {
@@ -71,6 +76,10 @@ type Repository interface {
 	FindCoverFile(videoDir string) (string, error)
 	// 从 download_status.json 中提取字幕语言列表
 	GetSubtitleLanguagesFromStatus(videoDir string) ([]string, error)
+	// 账号上传计数
+	GetTodayUploadCount(account string) (int, error)
+	IncrementTodayUploadCount(account string) error
+	LoadTodayUploadCounts() (map[string]int, error)
 }
 
 // VideoInfo 视频信息结构，用于保存到JSON文件
@@ -1180,4 +1189,79 @@ func (r *repository) GetSubtitleLanguagesFromStatus(videoDir string) ([]string, 
 	}
 
 	return languages, nil
+}
+
+// ---------- 账号上传计数（按天） ----------
+
+func (r *repository) countersFile() string {
+	globalDir := filepath.Join(r.outputDir, ".global")
+	_ = os.MkdirAll(globalDir, 0755)
+	return filepath.Join(globalDir, "upload_counters.json")
+}
+
+func (r *repository) loadCountersRaw() (*uploadCounters, error) {
+	path := r.countersFile()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// 不存在则初始化
+		return &uploadCounters{
+			Date:   time.Now().Format("2006-01-02"),
+			Counts: map[string]int{},
+		}, nil
+	}
+	var uc uploadCounters
+	if err := json.Unmarshal(data, &uc); err != nil {
+		return &uploadCounters{
+			Date:   time.Now().Format("2006-01-02"),
+			Counts: map[string]int{},
+		}, nil
+	}
+	// 跨天则重置
+	today := time.Now().Format("2006-01-02")
+	if uc.Date != today {
+		uc = uploadCounters{
+			Date:   today,
+			Counts: map[string]int{},
+		}
+	}
+	return &uc, nil
+}
+
+func (r *repository) saveCountersRaw(uc *uploadCounters) error {
+	path := r.countersFile()
+	data, err := json.MarshalIndent(uc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (r *repository) LoadTodayUploadCounts() (map[string]int, error) {
+	uc, err := r.loadCountersRaw()
+	if err != nil {
+		return nil, err
+	}
+	// 拷贝一份返回
+	m := make(map[string]int, len(uc.Counts))
+	for k, v := range uc.Counts {
+		m[k] = v
+	}
+	return m, nil
+}
+
+func (r *repository) GetTodayUploadCount(account string) (int, error) {
+	uc, err := r.loadCountersRaw()
+	if err != nil {
+		return 0, err
+	}
+	return uc.Counts[account], nil
+}
+
+func (r *repository) IncrementTodayUploadCount(account string) error {
+	uc, err := r.loadCountersRaw()
+	if err != nil {
+		return err
+	}
+	uc.Counts[account] = uc.Counts[account] + 1
+	return r.saveCountersRaw(uc)
 }

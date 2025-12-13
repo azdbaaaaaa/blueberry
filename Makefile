@@ -3,6 +3,9 @@ BIN_DIR=bin
 BIN=$(BIN_DIR)/$(APP_NAME)
 GO_VERSION?=1.24.0
 GO_BIN?=$(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
+PY_VERSION?=3.12.11
+PY_PREFIX=/usr/local
+PY_BIN=$(PY_PREFIX)/bin/python3.12
 COOKIES_DIR?=cookies
 REMOTE_USER?=worker
 REMOTE_HOST?=13.212.120.112
@@ -24,6 +27,18 @@ deps:
 	for pkg in git tar xz curl; do \
 	if ! command -v $$pkg >/dev/null 2>&1; then sudo $$PKG -y install $$pkg || true; else echo "$$pkg already installed"; fi; \
 	done
+	# 安装 Python $(PY_VERSION)（源码编译，altinstall，不覆盖系统 python）
+	if ! $(PY_BIN) -V 2>/dev/null | grep -q "Python $(PY_VERSION)"; then \
+	  echo "Installing Python $(PY_VERSION) ..."; \
+	  for dep in gcc make openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel readline-devel sqlite-devel tk-devel libuuid-devel findutils; do \
+	    sudo $$PKG -y install $$dep || true; \
+	  done; \
+	  cd /tmp && curl -fsSL -o Python-$(PY_VERSION).tgz https://www.python.org/ftp/python/$(PY_VERSION)/Python-$(PY_VERSION).tgz && \
+	  tar -xf Python-$(PY_VERSION).tgz && cd Python-$(PY_VERSION) && \
+	  ./configure --enable-optimizations --with-lto && \
+	  make -j$$(nproc) && sudo make altinstall && \
+	  $(PY_BIN) -m ensurepip -U || true; \
+	else echo "Python $(PY_VERSION) already installed"; fi
 	# 安装 Go 指定版本（$(GO_VERSION)）
 	if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$(GO_VERSION)"; then \
 	  echo "Installing Go $(GO_VERSION) ..."; \
@@ -35,7 +50,8 @@ deps:
 	  sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
 	else echo "Go $(GO_VERSION) already installed"; fi
 	# 安装/升级 yt-dlp
-	if ! command -v yt-dlp >/dev/null 2>&1; then sudo pip3 install --upgrade yt-dlp; else echo "yt-dlp already installed"; fi
+	if command -v pip3.12 >/dev/null 2>&1; then sudo pip3.12 install --upgrade yt-dlp; \
+	else sudo pip3 install --upgrade yt-dlp; fi
 	# 安装 ffmpeg/ffprobe（静态版）
 	if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then \
 	  sudo mkdir -p /usr/local/bin; \

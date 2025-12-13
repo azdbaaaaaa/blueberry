@@ -141,6 +141,10 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 
 	if result.Success {
 		logger.Info().Str("video_id", result.VideoID).Msg("上传成功")
+		// 增加账号当日上传计数
+		if err := s.fileManager.IncrementTodayUploadCount(accountName); err != nil {
+			logger.Warn().Err(err).Str("account", accountName).Msg("更新账号当日上传计数失败")
+		}
 		// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
 		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID); err != nil {
 			logger.Warn().Err(err).Msg("标记上传完成状态失败")

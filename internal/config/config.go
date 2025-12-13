@@ -25,6 +25,8 @@ type BilibiliConfig struct {
 	UploadMethod       string `mapstructure:"upload_method"`        // 上传方式：http（纯HTTP，推荐）或 chromedp（浏览器自动化，需要浏览器）
 	// 上传成功后是否删除本地原视频文件（仅删除视频，不删除字幕/元数据）
 	DeleteOriginalAfterUpload bool `mapstructure:"delete_original_after_upload"`
+	// 每个账号每日最大上传数，用于随机轮转账号时的限流，默认 160
+	DailyUploadLimit int `mapstructure:"daily_upload_limit"`
 }
 
 type YouTubeChannel struct {
@@ -94,6 +96,7 @@ var globalConfig *Config
 func Load(configPath string) (*Config, error) {
 	// 默认值
 	viper.SetDefault("channel.generate_pending_downloads", false)
+	viper.SetDefault("bilibili.daily_upload_limit", 160)
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)
