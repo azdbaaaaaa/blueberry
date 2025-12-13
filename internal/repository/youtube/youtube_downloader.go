@@ -200,16 +200,11 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 	args := []string{
 		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
 		"--no-warnings",
-		// 更稳健的客户端组合（去掉 iOS）
-		"--extractor-args", "youtube:player_client=web,android",
 		// 强制 IPv4，规避部分网络环境问题
 		"--force-ipv4",
 	}
 
-	// 如存在 Node，声明 JS runtime，提升兼容性
-	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
-	}
+	// 不主动指定 extractor-args 或 js-runtimes，保持与手动最小命令一致
 
 	// 添加 cookies 支持（优先使用 cookies 文件，因为服务器上可能没有浏览器）
 	if d.cookiesFile != "" {
