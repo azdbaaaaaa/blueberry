@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"blueberry/internal/config"
 	"blueberry/internal/repository/bilibili"
@@ -67,6 +69,36 @@ func NewUploadService(
 
 func (s *uploadService) RenameSubtitlesForAID(subtitlePaths []string, aid string) ([]string, error) {
 	return s.subtitleManager.RenameSubtitlesForAID(subtitlePaths, aid, s.cfg.Output.Directory)
+}
+
+// selectAvailableAccount 随机选择当日未达上限的账号
+func (s *uploadService) selectAvailableAccount() (string, bool) {
+	names := make([]string, 0, len(s.cfg.BilibiliAccounts))
+	for name := range s.cfg.BilibiliAccounts {
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	counts, err := s.fileManager.LoadTodayUploadCounts()
+	if err != nil {
+		counts = map[string]int{}
+	}
+	limit := s.cfg.Bilibili.DailyUploadLimit
+	if limit <= 0 {
+		limit = 160
+	}
+	available := make([]string, 0, len(names))
+	for _, n := range names {
+		if counts[n] < limit {
+			available = append(available, n)
+		}
+	}
+	if len(available) == 0 {
+		return "", false
+	}
+	rand.Seed(time.Now().UnixNano())
+	return available[rand.Intn(len(available))], true
 }
 
 func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string, accountName string) error {
@@ -194,13 +226,15 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 		return nil
 	}
 
-	account, exists := s.cfg.BilibiliAccounts[targetChannel.BilibiliAccount]
-	if !exists {
-		logger.Error().Str("account", targetChannel.BilibiliAccount).Msg("账号不存在")
-		return nil
+	// 选择当日未达上限的可用账号（随机）
+	accountName, ok := s.selectAvailableAccount()
+	if !ok {
+		logger.Error().Msg("没有可用的B站账号（当日额度已用尽）")
+		return fmt.Errorf("no available bilibili account today")
 	}
+	account := s.cfg.BilibiliAccounts[accountName]
 
-	logger.Info().Str("channel_url", channelURL).Str("account", targetChannel.BilibiliAccount).Msg("开始处理频道上传")
+	logger.Info().Str("channel_url", channelURL).Str("account", accountName).Msg("开始处理频道上传")
 
 	channelID := s.fileManager.ExtractChannelID(channelURL)
 

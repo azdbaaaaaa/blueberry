@@ -51,10 +51,8 @@ bilibili:
 
 youtube_channels:
   - url: "https://www.youtube.com/@example/videos"
-    bilibili_account: "account1"
     languages: ["en", "id", "my", "th"]  # 该频道需要下载的字幕语言，为空则使用全局配置
   - url: "https://www.youtube.com/@another/videos"
-    bilibili_account: "account2"
     languages: ["en", "zh"]  # 不同频道可以配置不同的字幕语言
 
 bilibili_accounts:
@@ -95,9 +93,8 @@ channel:
 
 - `youtube_channels`: YouTube频道列表，每个频道需要指定：
   - `url`: 频道URL（支持 `/videos` 后缀）
-  - `bilibili_account`: 对应的B站账号名称
   - `languages`: 该频道需要下载的字幕语言列表（可选，为空则使用全局配置）
-- `bilibili_accounts`: B站账号信息，包含用户名和密码
+- `bilibili_accounts`: B站账号信息（程序会在这些账号中随机选择一个未达当日上传上限的账号）
 - `subtitles.languages`: 全局默认字幕语言列表（可选，为空则使用频道配置或下载全部）
 - `output.directory`: 视频和字幕文件的保存目录
 

@@ -30,9 +30,8 @@ type BilibiliConfig struct {
 }
 
 type YouTubeChannel struct {
-	URL             string   `mapstructure:"url"`
-	BilibiliAccount string   `mapstructure:"bilibili_account"`
-	Languages       []string `mapstructure:"languages"` // 该频道需要下载的字幕语言，为空则使用全局配置或下载全部
+	URL       string   `mapstructure:"url"`
+	Languages []string `mapstructure:"languages"` // 该频道需要下载的字幕语言，为空则使用全局配置或下载全部
 }
 
 type Account struct {
@@ -145,12 +144,6 @@ func validate(cfg *Config) error {
 	for _, channel := range cfg.YouTubeChannels {
 		if channel.URL == "" {
 			return fmt.Errorf("YouTube频道URL不能为空")
-		}
-		if channel.BilibiliAccount == "" {
-			return fmt.Errorf("频道 %s 未指定B站账号", channel.URL)
-		}
-		if _, exists := cfg.BilibiliAccounts[channel.BilibiliAccount]; !exists {
-			return fmt.Errorf("频道 %s 指定的账号 %s 不存在", channel.URL, channel.BilibiliAccount)
 		}
 	}
 
