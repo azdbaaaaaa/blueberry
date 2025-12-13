@@ -14,7 +14,12 @@ deps:
 	# 基础包管理器（Amazon Linux 2 用 yum，AL2023 用 dnf）
 	if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi; \
 	sudo $$PKG -y update || true; \
-	sudo $$PKG -y install python3-pip git tar xz curl || true
+	# 按需安装 pip3
+	if ! command -v pip3 >/dev/null 2>&1; then sudo $$PKG -y install python3-pip || true; else echo "pip3 already installed"; fi; \
+	# 按需安装基础工具
+	for pkg in git tar xz curl; do \
+	if ! command -v $$pkg >/dev/null 2>&1; then sudo $$PKG -y install $$pkg || true; else echo "$$pkg already installed"; fi; \
+	done
 	# 安装 Go 指定版本（$(GO_VERSION)）
 	if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$(GO_VERSION)"; then \
 	  echo "Installing Go $(GO_VERSION) ..."; \
@@ -24,18 +29,20 @@ deps:
 	  sudo tar -C /usr/local -xzf /tmp/go.tar.gz; \
 	  sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
 	  sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
-	fi
+	else echo "Go $(GO_VERSION) already installed"; fi
 	# 安装/升级 yt-dlp
-	sudo pip3 install --upgrade yt-dlp
+	if ! command -v yt-dlp >/dev/null 2>&1; then sudo pip3 install --upgrade yt-dlp; else echo "yt-dlp already installed"; fi
 	# 安装 ffmpeg/ffprobe（静态版）
-	sudo mkdir -p /usr/local/bin
-	cd /usr/local/bin && \
-	  curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-	  tar -xf ffmpeg.tar.xz && \
-	  cd ffmpeg-*-static && \
-	  sudo cp ffmpeg ffprobe /usr/local/bin/ && \
-	  sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-	  cd .. && rm -f ffmpeg.tar.xz
+	if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then \
+	  sudo mkdir -p /usr/local/bin; \
+	  cd /usr/local/bin && \
+	    curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+	    tar -xf ffmpeg.tar.xz && \
+	    cd ffmpeg-*-static && \
+	    sudo cp ffmpeg ffprobe /usr/local/bin/ && \
+	    sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+	    cd .. && rm -f ffmpeg.tar.xz; \
+	else echo "ffmpeg/ffprobe already installed"; fi
 
 install: build
 	sudo mkdir -p /usr/local/$(APP_NAME)
