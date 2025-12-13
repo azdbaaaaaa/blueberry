@@ -7,7 +7,7 @@ PY_VERSION?=3.12.11
 PYENV_ROOT?=/usr/local/pyenv
 COOKIES_DIR?=cookies
 REMOTE_USER?=worker
-REMOTE_HOST?=13.212.120.112
+REMOTE_HOST?=18.142.138.158
 REMOTE_PATH?=/home/worker/blueberry/cookies
 REMOTE_APP_DIR?=/home/worker/blueberry
 CONFIG_FILE?=config.yaml
@@ -47,6 +47,11 @@ deps:
 	# 安装/升级 yt-dlp（优先使用 pyenv Python）
 	if [ -x "$(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3" ]; then sudo $(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3 install --upgrade yt-dlp; \
 	else sudo pip3 install --upgrade yt-dlp || true; fi
+	# 安装 Node.js 20（供 yt-dlp 执行 JS runtime）
+	if ! command -v node >/dev/null 2>&1; then \
+	  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && \
+	  sudo $$PKG -y install nodejs || true; \
+	else echo "node already installed"; fi
 	# 安装 ffmpeg/ffprobe（静态版）
 	if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then \
 	  sudo mkdir -p /usr/local/bin; \
@@ -92,5 +97,22 @@ sync-config:
 	@test -f $(CONFIG_FILE) || (echo "Config file '$(CONFIG_FILE)' not found" && exit 1)
 	ssh $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_APP_DIR)"
 	rsync -azP -e "ssh" $(CONFIG_FILE) $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_APP_DIR)/config.yaml
+
+# -------- Docker helpers --------
+IMAGE?=blueberry:latest
+DOCKER_APP_DIR?=/home/worker/blueberry
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+# ARGS allows overriding default command, e.g. ARGS="sync --all"
+ARGS?=--help
+docker-run:
+	docker run --rm -it \
+		-v $(PWD)/downloads:$(DOCKER_APP_DIR)/downloads \
+		-v $(PWD)/cookies:$(DOCKER_APP_DIR)/cookies \
+		-v $(PWD)/config.yaml:$(DOCKER_APP_DIR)/config.yaml \
+		$(IMAGE) $(ARGS)
+
 
 

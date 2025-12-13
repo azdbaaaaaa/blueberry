@@ -159,7 +159,33 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		time.Sleep(delay)
 	}
 
-	// 所有重试都失败了
+	// 兜底：若是“无法提取 player response”，尝试最小化参数再试一次
+	if strings.Contains(lastOutput, "Failed to extract any player response") {
+		minArgs := d.buildMinimalArgs(videoDir, videoURL, languages)
+		logger.Info().Msg("尝试使用最小化参数进行兜底下载")
+		cmd := exec.CommandContext(ctx, "yt-dlp", minArgs...)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			// 成功，返回结果
+			videoFile, errFind := d.fileRepo.FindVideoFile(videoDir)
+			if errFind != nil {
+				return nil, fmt.Errorf("查找视频文件失败: %w", errFind)
+			}
+			result.VideoPath = videoFile
+			if subtitleFiles, err := d.fileRepo.FindSubtitleFiles(videoDir); err == nil {
+				result.SubtitlePaths = subtitleFiles
+				d.cleanupFrameSrtFiles(videoDir)
+				result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
+			}
+			result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
+			return result, nil
+		}
+		// 覆盖最后输出，便于日志定位
+		lastErr = err
+		lastOutput = string(output)
+	}
+
+	// 所有尝试都失败了
 	logger.Error().
 		Str("command", fullCommand).
 		Str("video_url", videoURL).
@@ -174,22 +200,15 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 	args := []string{
 		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
 		"--no-warnings",
-		// 使用 extractor-args 指定多个客户端，提高成功率
-		// 优先使用 android 客户端（更不容易被检测）
-		"--extractor-args", "youtube:player_client=android,ios,web",
-		// 添加 User-Agent 模拟真实浏览器（使用最新的 Chrome）
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		// 添加 referer，模拟从 YouTube 页面访问
-		"--referer", "https://www.youtube.com/",
-		// 添加额外的 HTTP 头，模拟真实浏览器
-		"--add-header", "Accept-Language:en-US,en;q=0.9",
-		"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"--add-header", "Accept-Encoding:gzip, deflate, br",
-		"--add-header", "DNT:1",
-		"--add-header", "Connection:keep-alive",
-		"--add-header", "Upgrade-Insecure-Requests:1",
-		// 不指定 --format，让 yt-dlp 使用默认格式选择策略
-		// yt-dlp 默认会选择最佳可用格式，自动处理各种情况
+		// 更稳健的客户端组合（去掉 iOS）
+		"--extractor-args", "youtube:player_client=web,android",
+		// 强制 IPv4，规避部分网络环境问题
+		"--force-ipv4",
+	}
+
+	// 如存在 Node，声明 JS runtime，提升兼容性
+	if _, err := exec.LookPath("node"); err == nil {
+		args = append(args, "--js-runtimes", "node")
 	}
 
 	// 添加 cookies 支持（优先使用 cookies 文件，因为服务器上可能没有浏览器）
@@ -265,6 +284,37 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 
 	args = append(args, videoURL)
 
+	return args
+}
+
+// buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）
+func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string) []string {
+	args := []string{
+		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
+		"--no-warnings",
+		"--force-ipv4",
+	}
+	if _, err := exec.LookPath("node"); err == nil {
+		args = append(args, "--js-runtimes", "node")
+	}
+	if d.cookiesFile != "" {
+		cookiesPath := d.cookiesFile
+		if !filepath.IsAbs(cookiesPath) {
+			if absPath, err := filepath.Abs(cookiesPath); err == nil {
+				cookiesPath = absPath
+			}
+		}
+		args = append(args, "--cookies", cookiesPath)
+	} else if d.cookiesFromBrowser != "" {
+		args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
+	}
+	// 字幕参数尽量保持，但不加额外延迟和转换
+	if len(languages) > 0 {
+		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", strings.Join(languages, ","))
+	} else {
+		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all")
+	}
+	args = append(args, videoURL)
 	return args
 }
 

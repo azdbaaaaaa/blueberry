@@ -163,6 +163,38 @@ channel:
 ### `sync`
 逐个视频执行“下载→上传”的顺序同步，避免批量下载后统一上传导致的空间/状态不一致问题。
 
+## 使用 Docker 运行
+
+### 构建镜像
+```bash
+make docker-build            # 构建 blueberry:latest
+# 或自定义镜像名：
+IMAGE=blueberry:dev make docker-build
+```
+
+镜像内包含：
+- Go 构建的 `blueberry` 可执行文件
+- Python 3.12、yt-dlp
+- Node.js（yt-dlp JS runtime）
+- ffmpeg/ffprobe
+
+### 运行（挂载下载目录、cookies 与配置）
+```bash
+# 查看命令
+make docker-run
+
+# 串行同步全部频道（推荐）
+make docker-run ARGS="sync --all"
+
+# 指定频道串行同步
+make docker-run ARGS='sync --channel "https://www.youtube.com/@example/videos"'
+```
+容器内默认工作目录：`/home/worker/blueberry`。
+请确保本地存在并挂载：
+- `./downloads` → `/home/worker/blueberry/downloads`
+- `./cookies` → `/home/worker/blueberry/cookies`
+- `./config.yaml` → `/home/worker/blueberry/config.yaml`
+
 ### `channel`
 解析/同步频道信息。
 支持跳过生成 pending（适合超大频道）：
