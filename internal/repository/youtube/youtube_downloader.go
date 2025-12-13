@@ -202,8 +202,6 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"--no-warnings",
 		// 强制 IPv4，规避部分网络环境问题
 		"--force-ipv4",
-		// 不回写 cookies，避免污染现有登录态
-		"--no-write-cookies",
 	}
 
 	// 不主动指定 extractor-args 或 js-runtimes，保持与手动最小命令一致
@@ -290,7 +288,6 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
 		"--no-warnings",
 		"--force-ipv4",
-		"--no-write-cookies",
 	}
 	if _, err := exec.LookPath("node"); err == nil {
 		args = append(args, "--js-runtimes", "node")
