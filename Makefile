@@ -4,14 +4,15 @@ BIN=$(BIN_DIR)/$(APP_NAME)
 GO_VERSION?=1.24.0
 GO_BIN?=$(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 PY_VERSION?=3.12.11
-PY_PREFIX=/usr/local
-PY_BIN=$(PY_PREFIX)/bin/python3.12
+PYENV_ROOT?=/usr/local/pyenv
 COOKIES_DIR?=cookies
 REMOTE_USER?=worker
 REMOTE_HOST?=13.212.120.112
 REMOTE_PATH?=/home/worker/blueberry/cookies
+REMOTE_APP_DIR?=/home/worker/blueberry
+CONFIG_FILE?=config.yaml
 
-.PHONY: build deps install run start stop logs sync-cookies
+.PHONY: build deps install run start stop logs sync-cookies sync-config
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -21,24 +22,18 @@ deps:
 	# 基础包管理器（Amazon Linux 2 用 yum，AL2023 用 dnf）
 	if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi; \
 	sudo $$PKG -y update || true; \
-	# 按需安装 pip3
-	if ! command -v pip3 >/dev/null 2>&1; then sudo $$PKG -y install python3-pip || true; else echo "pip3 already installed"; fi; \
 	# 按需安装基础工具
 	for pkg in git tar xz curl; do \
 	if ! command -v $$pkg >/dev/null 2>&1; then sudo $$PKG -y install $$pkg || true; else echo "$$pkg already installed"; fi; \
 	done
-	# 安装 Python $(PY_VERSION)（源码编译，altinstall，不覆盖系统 python）
-	if ! $(PY_BIN) -V 2>/dev/null | grep -q "Python $(PY_VERSION)"; then \
-	  echo "Installing Python $(PY_VERSION) ..."; \
-	  for dep in gcc make openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel readline-devel sqlite-devel tk-devel libuuid-devel findutils; do \
-	    sudo $$PKG -y install $$dep || true; \
-	  done; \
-	  cd /tmp && curl -fsSL -o Python-$(PY_VERSION).tgz https://www.python.org/ftp/python/$(PY_VERSION)/Python-$(PY_VERSION).tgz && \
-	  tar -xf Python-$(PY_VERSION).tgz && cd Python-$(PY_VERSION) && \
-	  ./configure --enable-optimizations --with-lto && \
-	  make -j$$(nproc) && sudo make altinstall && \
-	  $(PY_BIN) -m ensurepip -U || true; \
-	else echo "Python $(PY_VERSION) already installed"; fi
+	# Python 构建依赖
+	sudo $$PKG -y install gcc gcc-c++ make zlib-devel bzip2-devel openssl-devel libffi-devel readline-devel sqlite-devel xz-devel || true
+	# 安装 pyenv（系统级）
+	if [ ! -d "$(PYENV_ROOT)" ]; then sudo git clone https://github.com/pyenv/pyenv.git $(PYENV_ROOT); else echo "pyenv already installed at $(PYENV_ROOT)"; fi
+	# 使用 pyenv 安装并设置 Python $(PY_VERSION)
+	export PYENV_ROOT=$(PYENV_ROOT); export PATH="$(PYENV_ROOT)/bin:$$PATH"; \
+	$(PYENV_ROOT)/bin/pyenv install -s $(PY_VERSION) && \
+	$(PYENV_ROOT)/bin/pyenv global $(PY_VERSION)
 	# 安装 Go 指定版本（$(GO_VERSION)）
 	if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$(GO_VERSION)"; then \
 	  echo "Installing Go $(GO_VERSION) ..."; \
@@ -49,9 +44,9 @@ deps:
 	  sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
 	  sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
 	else echo "Go $(GO_VERSION) already installed"; fi
-	# 安装/升级 yt-dlp
-	if command -v pip3.12 >/dev/null 2>&1; then sudo pip3.12 install --upgrade yt-dlp; \
-	else sudo pip3 install --upgrade yt-dlp; fi
+	# 安装/升级 yt-dlp（优先使用 pyenv Python）
+	if [ -x "$(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3" ]; then sudo $(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3 install --upgrade yt-dlp; \
+	else sudo pip3 install --upgrade yt-dlp || true; fi
 	# 安装 ffmpeg/ffprobe（静态版）
 	if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then \
 	  sudo mkdir -p /usr/local/bin; \
@@ -92,5 +87,10 @@ sync-cookies:
 	@test -d $(COOKIES_DIR) || (echo "Local cookies dir '$(COOKIES_DIR)' not found" && exit 1)
 	ssh $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_PATH)"
 	rsync -azP -e "ssh" --delete $(COOKIES_DIR)/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PATH)/
+
+sync-config:
+	@test -f $(CONFIG_FILE) || (echo "Config file '$(CONFIG_FILE)' not found" && exit 1)
+	ssh $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_APP_DIR)"
+	rsync -azP -e "ssh" $(CONFIG_FILE) $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_APP_DIR)/config.yaml
 
 
