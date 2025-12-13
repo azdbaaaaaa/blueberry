@@ -1,17 +1,41 @@
 APP_NAME=blueberry
 BIN_DIR=bin
 BIN=$(BIN_DIR)/$(APP_NAME)
+GO_VERSION?=1.24.0
+GO_BIN?=$(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 
 .PHONY: build deps install run start stop logs
 
 build:
 	mkdir -p $(BIN_DIR)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o $(BIN) .
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO_BIN) build -o $(BIN) .
 
 deps:
-	sudo yum -y update || true
-	sudo yum -y install python3-pip ffmpeg || true
+	# 基础包管理器（Amazon Linux 2 用 yum，AL2023 用 dnf）
+	if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi; \
+	sudo $$PKG -y update || true; \
+	sudo $$PKG -y install python3-pip git tar xz curl || true
+	# 安装 Go 指定版本（$(GO_VERSION)）
+	if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$(GO_VERSION)"; then \
+	  echo "Installing Go $(GO_VERSION) ..."; \
+	  sudo rm -rf /usr/local/go; \
+	  curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/go$(GO_VERSION).linux-amd64.tar.gz || \
+	    curl -fsSL -o /tmp/go.tar.gz https://dl.google.com/go/go$(GO_VERSION).linux-amd64.tar.gz; \
+	  sudo tar -C /usr/local -xzf /tmp/go.tar.gz; \
+	  sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
+	  sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+	fi
+	# 安装/升级 yt-dlp
 	sudo pip3 install --upgrade yt-dlp
+	# 安装 ffmpeg/ffprobe（静态版）
+	sudo mkdir -p /usr/local/bin
+	cd /usr/local/bin && \
+	  curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+	  tar -xf ffmpeg.tar.xz && \
+	  cd ffmpeg-*-static && \
+	  sudo cp ffmpeg ffprobe /usr/local/bin/ && \
+	  sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+	  cd .. && rm -f ffmpeg.tar.xz
 
 install: build
 	sudo mkdir -p /usr/local/$(APP_NAME)
