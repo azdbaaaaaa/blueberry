@@ -3,8 +3,12 @@ BIN_DIR=bin
 BIN=$(BIN_DIR)/$(APP_NAME)
 GO_VERSION?=1.24.0
 GO_BIN?=$(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
+COOKIES_DIR?=cookies
+REMOTE_USER?=worker
+REMOTE_HOST?=13.212.120.112
+REMOTE_PATH?=/home/worker/blueberry/cookies
 
-.PHONY: build deps install run start stop logs
+.PHONY: build deps install run start stop logs sync-cookies
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -67,5 +71,10 @@ stop:
 
 logs:
 	tail -n 200 -f /var/log/$(APP_NAME)/out.log /var/log/$(APP_NAME)/err.log
+
+sync-cookies:
+	@test -d $(COOKIES_DIR) || (echo "Local cookies dir '$(COOKIES_DIR)' not found" && exit 1)
+	ssh $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_PATH)"
+	rsync -azP -e "ssh" --delete $(COOKIES_DIR)/ $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_PATH)/
 
 
