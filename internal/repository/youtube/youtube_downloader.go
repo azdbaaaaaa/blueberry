@@ -204,7 +204,22 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"--force-ipv4",
 	}
 
-	// 不主动指定 extractor-args 或 js-runtimes，保持与手动最小命令一致
+	// 恢复之前移除的参数：更接近真实浏览器环境与稳定客户端组合
+	args = append(args,
+		"--extractor-args", "youtube:player_client=web,android",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/131.0.0.0 Safari/537.36",
+		"--referer", "https://www.youtube.com/",
+		"--add-header", "Accept-Language:en-US,en;q=0.9",
+		"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+		"--add-header", "Accept-Encoding:gzip, deflate, br",
+		"--add-header", "DNT:1",
+		"--add-header", "Connection:keep-alive",
+		"--add-header", "Upgrade-Insecure-Requests:1",
+	)
+	// 如存在 Node，声明 JS runtime，提升兼容性
+	// if _, err := exec.LookPath("node"); err == nil {
+	// 	args = append(args, "--js-runtimes", "node")
+	// }
 
 	// 添加 cookies 支持（优先使用 cookies 文件，因为服务器上可能没有浏览器）
 	if d.cookiesFile != "" {
