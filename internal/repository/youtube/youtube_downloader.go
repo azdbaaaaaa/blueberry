@@ -286,11 +286,13 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 
 	// 添加请求延迟参数，降低被反爬虫检测的风险
 	// --sleep-requests: 在请求之间延迟（秒），避免请求过于频繁
-	args = append(args, "--sleep-requests", "1")
+	args = append(args, "--sleep-requests", "3")
 	// --sleep-interval: 在下载间隔之间延迟（秒），模拟真实用户行为
 	args = append(args, "--sleep-interval", "2")
 	// --sleep-subtitles: 在下载字幕之间延迟（秒），避免字幕请求过于频繁
 	args = append(args, "--sleep-subtitles", "1")
+	// --concurrent-fragments: 控制并发
+	args = append(args, "--concurrent-fragments", "1")
 
 	args = append(args, videoURL)
 
