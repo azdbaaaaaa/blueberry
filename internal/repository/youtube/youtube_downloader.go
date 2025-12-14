@@ -304,9 +304,9 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 		"--no-warnings",
 		"--force-ipv4",
 	}
-	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
-	}
+	// if _, err := exec.LookPath("node"); err == nil {
+	// 	args = append(args, "--js-runtimes", "node")
+	// }
 	if d.cookiesFile != "" {
 		cookiesPath := d.cookiesFile
 		if !filepath.IsAbs(cookiesPath) {
