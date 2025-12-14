@@ -92,16 +92,27 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 	// 2. 先上传字幕（如失败仅警告继续）
 	var subtitleURL string
 	if len(subtitlePaths) > 0 {
-		subtitleURL, err = u.uploadSubtitles(ctx, subtitlePaths)
-		if err != nil {
-			// 字幕合法性检查失败或上传失败，记录详细错误但继续上传
-			// 用户可能需要手动处理不合法的字幕内容
+		const maxSubtitleRetries = 3
+		var lastSubErr error
+		for attempt := 1; attempt <= maxSubtitleRetries; attempt++ {
+			subtitleURL, lastSubErr = u.uploadSubtitles(ctx, subtitlePaths)
+			if lastSubErr == nil {
+				logger.Info().Int("attempt", attempt).Str("subtitle_url", subtitleURL).Msg("字幕上传完成")
+				break
+			}
 			logger.Warn().
-				Err(err).
+				Int("attempt", attempt).
+				Int("max_retries", maxSubtitleRetries).
+				Err(lastSubErr).
 				Strs("subtitle_paths", subtitlePaths).
-				Msg("上传字幕失败，继续上传其他内容（视频和封面图）。如需字幕，请手动检查并修复字幕文件中的不合法内容后重新上传")
-		} else {
-			logger.Info().Str("subtitle_url", subtitleURL).Msg("字幕上传完成")
+				Msg("上传字幕失败，将重试")
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		if lastSubErr != nil {
+			logger.Warn().
+				Err(lastSubErr).
+				Strs("subtitle_paths", subtitlePaths).
+				Msg("上传字幕失败，已用尽重试。继续上传其他内容（视频和封面图）。如需字幕，请手动检查并修复后重新上传")
 		}
 	}
 
@@ -112,28 +123,35 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 	}
 	logger.Info().Str("filename", filename).Msg("视频上传完成")
 
-	// 4. 上传封面图
+	// 4. 上传封面图（现在为必需）
 	var coverURL string
-	// 优先查找 cover.jpg，如果没有则查找 thumbnail.jpg
-	coverPath := filepath.Join(filepath.Dir(videoPath), "cover.jpg")
-	if _, err := os.Stat(coverPath); err != nil {
-		// 如果 cover.jpg 不存在，尝试使用 thumbnail.jpg
-		thumbnailPath := filepath.Join(filepath.Dir(videoPath), "thumbnail.jpg")
-		if _, err := os.Stat(thumbnailPath); err == nil {
-			coverPath = thumbnailPath
-			logger.Debug().Str("path", thumbnailPath).Msg("使用 thumbnail.jpg 作为封面图")
+	// 支持多种 cover 扩展名；若无，则尝试 thumbnail.jpg
+	dir := filepath.Dir(videoPath)
+	coverPath := ""
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+		p := filepath.Join(dir, "cover"+ext)
+		if _, statErr := os.Stat(p); statErr == nil {
+			coverPath = p
+			break
 		}
 	}
-
+	if coverPath == "" {
+		thumb := filepath.Join(dir, "thumbnail.jpg")
+		if _, statErr := os.Stat(thumb); statErr == nil {
+			coverPath = thumb
+			logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图")
+		}
+	}
+	if coverPath == "" {
+		return nil, fmt.Errorf("未找到封面图文件（需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）")
+	}
 	if _, err := os.Stat(coverPath); err == nil {
 		coverURL, err = u.uploadCover(ctx, coverPath)
 		if err != nil {
-			logger.Warn().Err(err).Msg("上传封面图失败，继续发布")
+			return nil, fmt.Errorf("上传封面图失败: %w", err)
 		} else {
 			logger.Info().Str("cover_url", coverURL).Msg("封面图上传完成")
 		}
-	} else {
-		logger.Debug().Msg("未找到封面图文件（cover.jpg 或 thumbnail.jpg），将使用默认封面")
 	}
 
 	// 5. 发布视频
@@ -587,25 +605,51 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 	formData := url.Values{}
 	formData.Set("filename", filename)
 
-	req, err = http.NewRequestWithContext(ctx, "POST", completeURL, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return "", err
-	}
+	// 对完成上传增加重试（处理网络抖动 EOF 等）
+	maxRetries := 3
+	var completeErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err = http.NewRequestWithContext(ctx, "POST", completeURL, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return "", err
+		}
+		u.setCookies(req)
+		u.setHeaders(req)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	u.setCookies(req)
-	u.setHeaders(req)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err = u.httpClient.Do(req)
+		if err == nil && resp != nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			logger.Info().Int("attempt", attempt).Msg("完成上传成功")
+			goto COMPLETE_OK
+		}
 
-	resp, err = u.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("完成上传失败: %w", err)
-	}
-	defer resp.Body.Close()
+		// 记录错误详情
+		status := 0
+		bodyPreview := ""
+		if resp != nil {
+			status = resp.StatusCode
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			bodyPreview = previewForLog(string(b), 500)
+		}
+		logger.Warn().
+			Int("attempt", attempt).
+			Int("max_retries", maxRetries).
+			Int("status", status).
+			Err(err).
+			Str("body", bodyPreview).
+			Msg("完成上传失败，准备重试")
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("完成上传失败: status %d, body: %s", resp.StatusCode, string(body))
+		completeErr = err
+		// 指数退避
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
+	if completeErr != nil {
+		return "", fmt.Errorf("完成上传失败: %w", completeErr)
+	}
+	return "", fmt.Errorf("完成上传失败")
+COMPLETE_OK:
 
 	logger.Info().Str("filename", filename).Msg("视频上传完成")
 	return filename, nil
@@ -1294,23 +1338,25 @@ func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []s
 		logger.Info().Int("count", len(subtitlePaths)).Msg("✓ 所有字幕文件存在")
 	}
 
-	// 3. 检查封面图（可选，但建议存在）
-	coverPath := filepath.Join(videoDir, "cover.jpg")
-	thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
+	// 3. 检查封面图（必需）
 	hasCover := false
-
-	if _, err := os.Stat(coverPath); err == nil {
-		hasCover = true
-		logger.Info().Str("cover_path", coverPath).Msg("✓ 封面图文件存在 (cover.jpg)")
-	} else if _, err := os.Stat(thumbnailPath); err == nil {
-		hasCover = true
-		logger.Info().Str("thumbnail_path", thumbnailPath).Msg("✓ 封面图文件存在 (thumbnail.jpg)")
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+		cp := filepath.Join(videoDir, "cover"+ext)
+		if _, err := os.Stat(cp); err == nil {
+			hasCover = true
+			logger.Info().Str("cover_path", cp).Msg("✓ 封面图文件存在")
+			break
+		}
 	}
-
 	if !hasCover {
-		logger.Warn().
-			Str("video_dir", videoDir).
-			Msg("⚠ 未找到封面图文件 (cover.jpg 或 thumbnail.jpg)，将使用默认封面")
+		thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
+		if _, err := os.Stat(thumbnailPath); err == nil {
+			hasCover = true
+			logger.Info().Str("thumbnail_path", thumbnailPath).Msg("✓ 封面图文件存在 (thumbnail.jpg)")
+		}
+	}
+	if !hasCover {
+		return "", fmt.Errorf("未找到封面图文件：需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg")
 	}
 
 	logger.Info().Msg("文件检查完成，所有必需文件都存在，可以开始上传")

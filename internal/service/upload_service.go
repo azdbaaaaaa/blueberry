@@ -29,6 +29,10 @@ type UploadService interface {
 	// 如果某个视频上传失败，会记录错误但继续处理下一个视频
 	UploadChannel(ctx context.Context, channelURL string) error
 
+	// UploadChannelDir 直接根据本地频道目录上传该目录下的所有视频
+	// 不依赖配置中的频道 URL；账号从全局账号池中随机选择（受每日上限限制）
+	UploadChannelDir(ctx context.Context, channelDir string) error
+
 	// UploadAllChannels 上传配置文件中所有频道下已下载的视频
 	// 遍历配置中的所有YouTube频道，依次调用 UploadChannel 进行上传
 	// 如果某个频道处理失败，会记录错误但继续处理下一个频道
@@ -201,6 +205,10 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 			} else {
 				logger.Info().Str("video_file", videoFile).Msg("已删除本地原视频文件（按配置）")
 			}
+		} else {
+			logger.Info().
+				Str("video_file", videoFile).
+				Msg("未启用删除本地视频文件配置（bilibili.delete_original_after_upload=false），文件已保留")
 		}
 
 		// 重命名字幕文件
@@ -333,12 +341,12 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
 		}
 
-		// 检查封面图是否存在（可选，上传器会自动查找）
+		// 检查封面图是否存在（必需，上传器缺失时会直接退出）
 		coverPath, _ := s.fileManager.FindCoverFile(videoDir)
 		if coverPath != "" {
 			logger.Debug().Str("cover_path", coverPath).Msg("找到封面图")
 		} else {
-			logger.Debug().Msg("未找到封面图，上传器将使用默认封面")
+			logger.Warn().Msg("未找到封面图，将导致上传器退出。请先生成/下载封面图")
 		}
 
 		logger.Info().
@@ -355,17 +363,13 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
 		if err != nil {
 			errorMsg := err.Error()
-			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败")
+			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败，跳过该视频继续下一个")
 			// 标记上传失败
 			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
 				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
 			}
-			// 发布失败时退出，方便排查问题
-			logger.Error().
-				Str("title", videoTitle).
-				Str("video_dir", videoDir).
-				Msg("上传失败，退出程序以便排查问题")
-			return fmt.Errorf("上传失败: %w", err)
+			// 不中断整个频道，继续下一个视频
+			continue
 		}
 
 		if result.Success && result.VideoID != "" {
@@ -386,6 +390,19 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 					Msg("上传状态已保存到 upload_status.json，下次运行将自动跳过此视频")
 			}
 
+			// 按配置删除本地原视频文件
+			if s.cfg.Bilibili.DeleteOriginalAfterUpload {
+				if err := os.Remove(videoFile); err != nil {
+					logger.Warn().Err(err).Str("video_file", videoFile).Msg("删除本地原视频文件失败")
+				} else {
+					logger.Info().Str("video_file", videoFile).Msg("已删除本地原视频文件（按配置）")
+				}
+			} else {
+				logger.Info().
+					Str("video_file", videoFile).
+					Msg("未启用删除本地视频文件配置（bilibili.delete_original_after_upload=false），文件已保留")
+			}
+
 			// 重命名字幕文件
 			if len(subtitlePaths) > 0 {
 				renamedPaths, err := s.RenameSubtitlesForAID(subtitlePaths, result.VideoID)
@@ -404,6 +421,147 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 				logger.Warn().Str("title", videoTitle).Msg("上传完成但未获取到视频ID，可能需要手动处理")
 			}
 			// 标记上传失败
+			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
+				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
+			}
+		}
+	}
+
+	return nil
+}
+
+// UploadChannelDir 根据本地频道目录上传
+func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string) error {
+	accountName, ok := s.selectAvailableAccount()
+	if !ok {
+		logger.Error().Msg("没有可用的B站账号（当日额度已用尽）")
+		return fmt.Errorf("no available bilibili account today")
+	}
+	account := s.cfg.BilibiliAccounts[accountName]
+
+	logger.Info().Str("channel_dir", channelDir).Str("account", accountName).Msg("开始处理频道目录上传")
+
+	// 推导 channelID（目录名）
+	channelID := filepath.Base(channelDir)
+
+	// 尝试加载 channel_info.json
+	var videos []map[string]interface{}
+	if info, err := s.fileManager.LoadChannelInfo(channelID); err == nil && len(info) > 0 {
+		videos = info
+		logger.Info().Int("count", len(videos)).Msg("从频道信息文件加载视频列表")
+	} else {
+		// 目录扫描：遍历子目录作为视频目录
+		logger.Info().Str("channel_dir", channelDir).Msg("未找到频道信息文件，从目录扫描视频")
+		entries, err := os.ReadDir(channelDir)
+		if err != nil {
+			return fmt.Errorf("读取频道目录失败: %w", err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			videoID := e.Name()
+			videos = append(videos, map[string]interface{}{
+				"id":    videoID,
+				"title": "",
+				"url":   "",
+			})
+		}
+	}
+
+	logger.Info().Int("count", len(videos)).Msg("找到视频")
+
+	for i, videoMap := range videos {
+		videoID, _ := videoMap["id"].(string)
+		title, _ := videoMap["title"].(string)
+		if videoID == "" {
+			continue
+		}
+		logger.Info().
+			Int("current", i+1).
+			Int("total", len(videos)).
+			Str("video_id", videoID).
+			Str("title", title).
+			Msg("处理视频")
+
+		// 本地视频目录
+		videoDir, _ := s.fileManager.FindVideoDirByID(channelID, videoID)
+		if videoDir == "" {
+			// 直接拼接
+			videoDir = filepath.Join(s.cfg.Output.Directory, channelID, videoID)
+		}
+
+		// 已上传跳过
+		if s.fileManager.IsVideoUploaded(videoDir) {
+			logger.Info().Str("video_id", videoID).Msg("视频已上传，跳过")
+			continue
+		}
+
+		videoFile, err := s.fileManager.FindVideoFile(videoDir)
+		if err != nil || videoFile == "" {
+			logger.Warn().Str("video_id", videoID).Str("video_dir", videoDir).Msg("未找到本地视频文件，跳过")
+			continue
+		}
+
+		allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
+		subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
+		if len(subtitlePaths) == 0 {
+			subtitlePaths = allSubtitlePaths
+		}
+
+		videoTitle := title
+		if videoTitle == "" {
+			videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
+		}
+
+		logger.Info().
+			Str("video_file", videoFile).
+			Str("title", videoTitle).
+			Int("subtitle_count", len(subtitlePaths)).
+			Msg("准备上传")
+
+		if err := s.fileManager.MarkVideoUploading(videoDir); err != nil {
+			logger.Warn().Err(err).Msg("标记上传状态失败")
+		}
+
+		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
+		if err != nil {
+			errorMsg := err.Error()
+			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败")
+			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
+				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
+			}
+			// 不中断整个频道，继续下一个视频
+			continue
+		}
+
+		if result.Success && result.VideoID != "" {
+			logger.Info().Str("video_id", result.VideoID).Str("title", videoTitle).Msg("视频上传并发布成功")
+			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
+				logger.Warn().Err(err).Msg("标记上传完成状态失败")
+			}
+			// 按配置删除本地原视频文件
+			if s.cfg.Bilibili.DeleteOriginalAfterUpload {
+				if err := os.Remove(videoFile); err != nil {
+					logger.Warn().Err(err).Str("video_file", videoFile).Msg("删除本地原视频文件失败")
+				} else {
+					logger.Info().Str("video_file", videoFile).Msg("已删除本地原视频文件（按配置）")
+				}
+			} else {
+				logger.Info().
+					Str("video_file", videoFile).
+					Msg("未启用删除本地视频文件配置（bilibili.delete_original_after_upload=false），文件已保留")
+			}
+			if len(subtitlePaths) > 0 {
+				if renamed, err := s.RenameSubtitlesForAID(subtitlePaths, result.VideoID); err == nil {
+					logger.Info().Int("count", len(renamed)).Msg("字幕文件已重命名")
+				}
+			}
+		} else {
+			errorMsg := "上传完成但未获取到视频ID"
+			if result.Error != nil {
+				errorMsg = result.Error.Error()
+			}
 			if markErr := s.fileManager.MarkVideoUploadFailed(videoDir, errorMsg); markErr != nil {
 				logger.Warn().Err(markErr).Msg("标记上传失败状态失败")
 			}

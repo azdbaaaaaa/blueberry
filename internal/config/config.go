@@ -43,6 +43,8 @@ type Account struct {
 
 type SubtitlesConfig struct {
 	Languages []string `mapstructure:"languages"`
+	// AutoFixOverlap 控制是否自动修复字幕时间轴重叠，默认 false（不启用）
+	AutoFixOverlap bool `mapstructure:"auto_fix_overlap"`
 }
 
 type OutputConfig struct {
@@ -96,6 +98,7 @@ func Load(configPath string) (*Config, error) {
 	// 默认值
 	viper.SetDefault("channel.generate_pending_downloads", false)
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
+	viper.SetDefault("subtitles.auto_fix_overlap", false)
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)

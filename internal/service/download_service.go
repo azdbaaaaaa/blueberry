@@ -1197,9 +1197,11 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 	case ".webp":
 		accept = "image/webp"
 	}
-	cmd := exec.CommandContext(ctx, "curl", "-L", "-H", "Accept: "+accept, "-o", tempPath, thumbnail.URL)
+	// 使用 curl 严格检查 HTTP 错误（-f: HTTP error fail, -L: 跟随重定向, -S: 显示错误）
+	cmd := exec.CommandContext(ctx, "curl", "-fsSL", "-H", "Accept: "+accept, "-o", tempPath, thumbnail.URL)
 	if err := cmd.Run(); err != nil {
 		// 如果 curl 失败，尝试使用 wget
+		// wget 默认对 404 返回非0
 		cmd = exec.CommandContext(ctx, "wget", "--header=Accept: "+accept, "-O", tempPath, thumbnail.URL)
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("下载缩略图失败: %w", err)
@@ -1208,6 +1210,11 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 
 	// 检测实际文件类型
 	actualExt := s.detectImageExtension(tempPath)
+	// 若无法识别为图片，认为下载失败（可能是404/HTML等）
+	if actualExt == "" {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("下载的缩略图不是有效图片（可能为404页面或HTML），url=%s", thumbnail.URL)
+	}
 	if strings.ToLower(actualExt) != strings.ToLower(ext) {
 		// 目标为 URL 指定的扩展；若返回类型不同，尝试转码为目标扩展
 		targetPath := coverPath
@@ -1275,7 +1282,7 @@ func (s *downloadService) extractExtensionFromURL(url string) string {
 func (s *downloadService) detectImageExtension(filePath string) string {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return ".jpg" // 默认返回 .jpg
+		return "" // 无法打开，视为无效
 	}
 	defer file.Close()
 
@@ -1283,10 +1290,10 @@ func (s *downloadService) detectImageExtension(filePath string) string {
 	buffer := make([]byte, 512)
 	n, err := file.Read(buffer)
 	if err != nil && err != io.EOF {
-		return ".jpg"
+		return ""
 	}
 	if n < 4 {
-		return ".jpg"
+		return ""
 	}
 
 	// 检测常见的图片格式
@@ -1307,8 +1314,8 @@ func (s *downloadService) detectImageExtension(filePath string) string {
 		return ".webp"
 	}
 
-	// 如果无法检测，默认返回 .jpg
-	return ".jpg"
+	// 未识别为图片
+	return ""
 }
 
 // generateCoverFromVideo 从视频第一帧生成封面图

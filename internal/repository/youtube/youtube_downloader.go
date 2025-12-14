@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"blueberry/internal/config"
 	"blueberry/internal/repository/file"
 	"blueberry/pkg/logger"
 	"blueberry/pkg/subtitle"
@@ -94,14 +95,18 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				d.cleanupFrameSrtFiles(videoDir)
 				// 如果下载的是 VTT 格式，尝试转换为 SRT
 				result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
-				// 检查字幕时间轴重叠
-				for _, subPath := range result.SubtitlePaths {
-					if err := d.validateSubtitleOverlap(subPath); err != nil {
-						logger.Warn().
-							Str("subtitle_path", subPath).
-							Err(err).
-							Msg("字幕时间轴重叠检查失败")
+				// 检查字幕时间轴重叠（受配置开关控制）
+				if cfg := config.Get(); cfg != nil && cfg.Subtitles.AutoFixOverlap {
+					for _, subPath := range result.SubtitlePaths {
+						if err := d.validateSubtitleOverlap(subPath); err != nil {
+							logger.Warn().
+								Str("subtitle_path", subPath).
+								Err(err).
+								Msg("字幕时间轴重叠检查失败")
+						}
 					}
+				} else {
+					logger.Debug().Msg("自动修复字幕时间轴重叠已禁用")
 				}
 				// 重命名字幕文件为 {video_id}_{lang}.{ext} 格式（暂时禁用）
 				// result.SubtitlePaths = d.renameSubtitlesToIDFormat(videoDir, videoID, result.SubtitlePaths)

@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	uploadVideoPath string
-	uploadAccount   string
-	uploadChannel   string
-	uploadAll       bool
+	uploadVideoPath  string
+	uploadAccount    string
+	uploadChannel    string
+	uploadChannelDir string
+	uploadAll        bool
 )
 
 var uploadCmd = &cobra.Command{
@@ -51,7 +52,7 @@ var uploadCmd = &cobra.Command{
 			return
 		}
 
-		// 如果指定了 --channel，上传指定频道
+		// 如果指定了 --channel，上传指定频道（URL）
 		if uploadChannel != "" {
 			logger.Info().Str("channel", uploadChannel).Msg("开始上传频道")
 			if err := application.UploadService.UploadChannel(ctx, uploadChannel); err != nil {
@@ -61,9 +62,19 @@ var uploadCmd = &cobra.Command{
 			return
 		}
 
+		// 如果指定了 --channel-dir，上传本地频道目录
+		if uploadChannelDir != "" {
+			logger.Info().Str("channel_dir", uploadChannelDir).Msg("开始上传频道目录")
+			if err := application.UploadService.UploadChannelDir(ctx, uploadChannelDir); err != nil {
+				logger.Error().Err(err).Str("channel_dir", uploadChannelDir).Msg("上传频道目录失败")
+				os.Exit(1)
+			}
+			return
+		}
+
 		// 否则，上传单个视频
 		if uploadVideoPath == "" {
-			fmt.Fprintf(os.Stderr, "请指定要上传的视频目录路径（--video-dir），或指定频道（--channel），或上传所有频道（--all）\n")
+			fmt.Fprintf(os.Stderr, "请指定：--video-dir（单视频）或 --channel（频道URL）或 --channel-dir（频道目录）或 --all（全部频道）\n")
 			os.Exit(1)
 		}
 
@@ -88,5 +99,6 @@ func init() {
 	uploadCmd.Flags().StringVar(&uploadVideoPath, "video-dir", "", "要上传的视频目录路径（单个视频模式）")
 	uploadCmd.Flags().StringVar(&uploadAccount, "account", "", "B站账号名称（单个视频模式）")
 	uploadCmd.Flags().StringVar(&uploadChannel, "channel", "", "要上传的频道URL（频道模式）")
+	uploadCmd.Flags().StringVar(&uploadChannelDir, "channel-dir", "", "要上传的本地频道目录（频道模式）")
 	uploadCmd.Flags().BoolVar(&uploadAll, "all", false, "上传配置文件中所有频道（全部频道模式）")
 }
