@@ -2,15 +2,18 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"blueberry/internal/app"
 	"blueberry/internal/config"
 	"blueberry/internal/repository/file"
+	"blueberry/internal/repository/youtube"
 	"blueberry/pkg/logger"
 
 	"github.com/rs/zerolog"
@@ -91,6 +94,10 @@ var syncCmd = &cobra.Command{
 
 				// 先下载该视频（包含字幕/缩略图等按需步骤）
 				if err := application.DownloadService.DownloadVideoDir(ctx, videoDir); err != nil {
+					if errors.Is(err, youtube.ErrBotDetection) || strings.Contains(err.Error(), "bot detection") {
+						logger.Error().Err(err).Msg("检测到 bot detection，立即退出程序")
+						os.Exit(1)
+					}
 					logger.Error().Err(err).Str("video_dir", videoDir).Msg("下载该视频失败，继续下一个")
 					continue
 				}

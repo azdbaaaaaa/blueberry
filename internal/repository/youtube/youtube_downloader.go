@@ -3,6 +3,7 @@ package youtube
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"blueberry/pkg/logger"
 	"blueberry/pkg/subtitle"
 )
+
+var ErrBotDetection = errors.New("bot detection")
 
 type Downloader interface {
 	DownloadVideo(ctx context.Context, channelID, videoURL string, languages []string, title string) (*DownloadResult, error)
@@ -115,35 +118,12 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		if strings.Contains(outputStr, "Sign in to confirm you're not a bot") ||
 			strings.Contains(outputStr, "confirm you're not a bot") ||
 			strings.Contains(outputStr, "authentication") {
-			// 认证错误，重试通常没用，但可以尝试不同的策略
-			logger.Warn().
-				Int("attempt", attempt).
-				Int("max_retries", maxRetries).
+			// 直接返回，交由上层立即退出程序
+			logger.Error().
 				Str("video_url", videoURL).
-				Msg("检测到认证错误（bot detection），可能需要更新 cookies")
-
-			// 如果是最后一次尝试，直接返回错误
-			if attempt == maxRetries {
-				break
-			}
-
-			// 尝试不同的 player client（仅最后一次重试时）
-			if attempt == maxRetries-1 {
-				// 修改 extractor-args，尝试只使用 web 客户端
-				for i, arg := range args {
-					if arg == "--extractor-args" && i+1 < len(args) {
-						args[i+1] = "youtube:player_client=web"
-						logger.Info().Msg("尝试使用 web 客户端重试")
-						break
-					}
-				}
-			}
-
-			// 添加延迟（指数退避）
-			delay := time.Duration(attempt*2) * time.Second
-			logger.Info().Dur("delay", delay).Msg("等待后重试")
-			time.Sleep(delay)
-			continue
+				Str("video_dir", videoDir).
+				Msg("检测到 bot detection，终止流程")
+			return nil, fmt.Errorf("%w: %s", ErrBotDetection, "Sign in to confirm you're not a bot")
 		}
 
 		// 其他错误（网络错误等），可以重试
