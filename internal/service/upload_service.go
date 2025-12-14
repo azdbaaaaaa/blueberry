@@ -128,6 +128,14 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return fmt.Errorf("路径不存在: %s", videoPath)
 	}
 
+	// 如果该视频已标记为上传完成，则跳过
+	if s.fileManager.IsVideoUploaded(videoDir) {
+		logger.Info().
+			Str("video_dir", videoDir).
+			Msg("视频已上传（upload_status.json 已完成），跳过上传")
+		return nil
+	}
+
 	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
 	// 优先选择英文字幕
 	subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
@@ -178,7 +186,7 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 			logger.Warn().Err(err).Str("account", accountName).Msg("更新账号当日上传计数失败")
 		}
 		// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
-		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID); err != nil {
+		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
 			logger.Warn().Err(err).Msg("标记上传完成状态失败")
 		} else {
 			logger.Info().
@@ -369,7 +377,7 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 				Msg("视频上传并发布成功")
 
 			// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
-			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID); err != nil {
+			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
 				logger.Warn().Err(err).Msg("标记上传完成状态失败")
 			} else {
 				logger.Info().

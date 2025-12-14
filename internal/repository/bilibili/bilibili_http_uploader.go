@@ -730,59 +730,14 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		return "", fmt.Errorf("转换字幕格式失败: %w", err)
 	}
 
-	// 2. 分批进行合法性检查（避免单次请求过大导致 -400）
-	checkURL := u.buildAPIURL("/intl/videoup/web2/subtitle/multi-check")
-
-	// 检查字幕条目是否为空
+	// 2. 暂时跳过字幕合法性检查，直接进入上传流程
 	if len(entries) == 0 {
-		logger.Warn().Msg("字幕条目为空，跳过合法性检查")
+		logger.Warn().Msg("字幕条目为空，跳过上传")
 		return "", nil
 	}
-
 	logger.Info().
 		Int("entry_count", len(entries)).
-		Msg("开始字幕合法性检查（分批）")
-	batchSize := 200
-	var allHitIDs []string
-	checkFailed := false
-	for start := 0; start < len(entries); start += batchSize {
-		end := start + batchSize
-		if end > len(entries) {
-			end = len(entries)
-		}
-		batch := entries[start:end]
-		hitIDs, err := u.checkSubtitleBatch(ctx, checkURL, batch)
-		if err != nil {
-			logger.Warn().
-				Err(err).
-				Int("batch_start", start).
-				Int("batch_end", end).
-				Msg("字幕合法性检查分批失败，将跳过校验并继续上传字幕")
-			checkFailed = true
-			break
-		}
-		if len(hitIDs) > 0 {
-			allHitIDs = append(allHitIDs, hitIDs...)
-		}
-	}
-	if !checkFailed && len(allHitIDs) > 0 {
-		hitSet := make(map[string]struct{}, len(allHitIDs))
-		for _, id := range allHitIDs {
-			hitSet[id] = struct{}{}
-		}
-		var filtered []subtitle.BilibiliSubtitleEntry
-		for _, e := range entries {
-			if _, bad := hitSet[e.ID]; !bad {
-				filtered = append(filtered, e)
-			}
-		}
-		logger.Warn().
-			Int("hit_count", len(allHitIDs)).
-			Int("before", len(entries)).
-			Int("after", len(filtered)).
-			Msg("已过滤不合法字幕条目")
-		entries = filtered
-	}
+		Msg("已跳过字幕合法性检查（临时关闭）")
 
 	// 3. 获取字幕直传 OSS 的临时凭证
 	tokenURL := u.buildAPIURL("/intl/videoup/web2/upload/token?type=subtitle")
