@@ -3,6 +3,7 @@ package bilibili
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,10 @@ type httpUploader struct {
 	httpClient         *http.Client
 	cookies            []Cookie
 	csrfToken          string
+	// Derived from preupload
+	uposEndpointHost string
+	uposChunkSize    int64
+	uposPutQuery     string
 }
 
 // NewHTTPUploader 创建基于 HTTP 的上传器
@@ -406,8 +411,25 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 		logger.Debug().Str("actual_filename", filename).Msg("使用 preupload 返回的文件名")
 	}
 
+	// 选择上传主机与分块大小（来自 preupload 返回的 endpoint 与 chunk_size）
+	baseUposHost := u.uposEndpointHost
+	if baseUposHost == "" {
+		baseUposHost = "https://upos-cs-upcdntxa.bilivideo.com"
+	}
+	chunkSize := u.uposChunkSize
+	if chunkSize <= 0 {
+		// 默认使用 22,020,096 字节（与 preupload 常见返回一致）
+		chunkSize = 22020096
+	}
+
+	logger.Info().
+		Str("upload_host", baseUposHost).
+		Int64("chunk_size", chunkSize).
+		Str("filename_initial", filename).
+		Msg("即将初始化分片上传")
+
 	// 1. 初始化上传
-	uploadURL := fmt.Sprintf("https://upos-cs-upcdntxa.bilivideo.com/iupever/%s?uploads&output=json", filename)
+	uploadURL := fmt.Sprintf("%s/iupever/%s?uploads&output=json", baseUposHost, filename)
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, nil)
 	if err != nil {
 		return "", err
@@ -500,10 +522,23 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 		return "", fmt.Errorf("初始化响应中 upload_id 为空，响应: %s", string(bodyBytes))
 	}
 
-	logger.Info().Str("upload_id", uploadID).Msg("已初始化上传")
+	// 可选字段：bucket/key（若返回则记录，便于追踪）
+	bucket := ""
+	if b, ok := initResp["bucket"].(string); ok {
+		bucket = b
+	}
+	key := ""
+	if k, ok := initResp["key"].(string); ok {
+		key = k
+	}
+
+	logger.Info().
+		Str("upload_id", uploadID).
+		Str("bucket", bucket).
+		Str("key", key).
+		Msg("已初始化上传")
 
 	// 2. 分块上传
-	chunkSize := int64(22 * 1024 * 1024) // 22MB per chunk
 	chunks := int((fileSize + chunkSize - 1) / chunkSize)
 
 	for chunk := 0; chunk < chunks; chunk++ {
@@ -519,8 +554,8 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 			return "", fmt.Errorf("读取分块 %d 失败: %w", partNumber, err)
 		}
 
-		chunkURL := fmt.Sprintf("https://upos-cs-upcdntxa.bilivideo.com/iupever/%s?partNumber=%d&uploadId=%s&chunk=%d&chunks=%d&size=%d&start=%d&end=%d&total=%d",
-			filename, partNumber, uploadID, chunk, chunks, end-start, start, end, fileSize)
+		chunkURL := fmt.Sprintf("%s/iupever/%s?partNumber=%d&uploadId=%s&chunk=%d&chunks=%d&size=%d&start=%d&end=%d&total=%d",
+			baseUposHost, filename, partNumber, uploadID, chunk, chunks, end-start, start, end, fileSize)
 
 		req, err := http.NewRequestWithContext(ctx, "PUT", chunkURL, bytes.NewReader(chunkData))
 		if err != nil {
@@ -597,6 +632,53 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 		// 在每个分块上传之间添加短暂延迟，避免连接被关闭
 		if chunk < chunks-1 {
 			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	// 2.5 可选：调用 UPOS 完成接口，获取 bucket/key/location（仅用于日志校验）
+	// 解析 profile 值（来自 preupload put_query）
+	profileVal := "iup/bup"
+	if u.uposPutQuery != "" {
+		if vals, err := url.ParseQuery(u.uposPutQuery); err == nil {
+			if pv := vals.Get("profile"); pv != "" {
+				profileVal = pv
+			}
+		}
+	}
+	finalizeURL := fmt.Sprintf("%s/iupever/%s?output=json&name=%s&profile=%s&uploadId=%s&biz_id=&biz=UGC",
+		baseUposHost, filename, url.QueryEscape(filepath.Base(videoPath)), url.QueryEscape(profileVal), uploadID)
+	if req, err := http.NewRequestWithContext(ctx, "POST", finalizeURL, nil); err == nil {
+		u.setHeaders(req)
+		if uposAuth != "" {
+			req.Header.Set("X-Upos-Auth", uposAuth)
+		}
+		if resp, err := u.httpClient.Do(req); err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var fin map[string]any
+				if json.Unmarshal(body, &fin) == nil {
+					logger.Info().
+						Str("finalize_url", finalizeURL).
+						Str("bucket", fmt.Sprint(fin["bucket"])).
+						Str("key", fmt.Sprint(fin["key"])).
+						Str("location", fmt.Sprint(fin["location"])).
+						Msg("UPOS 完成上传（bucket/key/location）")
+				} else {
+					logger.Info().
+						Str("finalize_url", finalizeURL).
+						Str("response", previewForLog(string(body), 300)).
+						Msg("UPOS 完成上传返回（解析失败，原样预览）")
+				}
+			} else {
+				logger.Warn().
+					Int("status", resp.StatusCode).
+					Str("finalize_url", finalizeURL).
+					Str("response", previewForLog(string(body), 300)).
+					Msg("UPOS 完成上传返回非200（忽略继续）")
+			}
+		} else {
+			logger.Warn().Err(err).Str("finalize_url", finalizeURL).Msg("UPOS 完成上传请求失败（忽略继续）")
 		}
 	}
 
@@ -737,6 +819,27 @@ func (u *httpUploader) getUposAuth(ctx context.Context, filename string, fileSiz
 		return "", "", fmt.Errorf("preupload 响应中没有 auth 字段")
 	}
 
+	// 记录并保存 endpoint 和 chunk_size、put_query
+	if ep, ok := preuploadResp["endpoint"].(string); ok && ep != "" {
+		if strings.HasPrefix(ep, "//") {
+			ep = "https:" + ep
+		} else if !strings.HasPrefix(ep, "http") {
+			ep = "https://" + ep
+		}
+		u.uposEndpointHost = strings.TrimRight(ep, "/")
+	}
+	if cs, ok := preuploadResp["chunk_size"].(float64); ok && cs > 0 {
+		u.uposChunkSize = int64(cs)
+	}
+	if pq, ok := preuploadResp["put_query"].(string); ok {
+		u.uposPutQuery = pq
+	}
+	logger.Info().
+		Str("endpoint", u.uposEndpointHost).
+		Int64("chunk_size", u.uposChunkSize).
+		Str("put_query", u.uposPutQuery).
+		Msg("preupload 返回的上传参数")
+
 	// 从 upos_uri 中提取实际文件名
 	actualFilename := filename
 	if uposURI, ok := preuploadResp["upos_uri"].(string); ok && uposURI != "" {
@@ -744,7 +847,23 @@ func (u *httpUploader) getUposAuth(ctx context.Context, filename string, fileSiz
 		// 提取文件名部分
 		if strings.HasPrefix(uposURI, "upos://iupever/") {
 			actualFilename = strings.TrimPrefix(uposURI, "upos://iupever/")
-			logger.Debug().Str("upos_uri", uposURI).Str("actual_filename", actualFilename).Msg("从 upos_uri 提取文件名")
+			logger.Info().
+				Str("upos_uri", uposURI).
+				Str("server_filename", actualFilename).
+				Msg("preupload 指定的服务端文件名")
+		}
+	}
+
+	// 可选：记录 endpoints 数组（候选上传域名）
+	if eps, ok := preuploadResp["endpoints"].([]interface{}); ok && len(eps) > 0 {
+		list := make([]string, 0, len(eps))
+		for _, e := range eps {
+			if s, ok2 := e.(string); ok2 {
+				list = append(list, s)
+			}
+		}
+		if len(list) > 0 {
+			logger.Info().Strs("endpoints", list).Msg("preupload 提供的候选上传域名")
 		}
 	}
 
@@ -766,7 +885,10 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		}
 	}
 
-	logger.Info().Str("srt_path", srtPath).Msg("开始上传字幕")
+	logger.Info().
+		Str("srt_path", srtPath).
+		Strs("all_subtitle_paths", subtitlePaths).
+		Msg("开始上传字幕")
 
 	// 1. 将 SRT 转换为 B站 JSON 格式
 	entries, err := subtitle.ConvertSRTToBilibiliJSON(srtPath)
@@ -791,6 +913,12 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 	}
 	u.setCookies(tokenReq)
 	u.setHeaders(tokenReq)
+	logger.Info().
+		Str("method", tokenReq.Method).
+		Str("url", tokenReq.URL.String()).
+		Str("referer", tokenReq.Header.Get("Referer")).
+		Str("origin", tokenReq.Header.Get("Origin")).
+		Msg("字幕上传凭证请求")
 	tokenResp, err := u.httpClient.Do(tokenReq)
 	if err != nil {
 		return "", fmt.Errorf("获取字幕上传凭证失败: %w", err)
@@ -881,10 +1009,76 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 		host = "https://" + host
 	}
 
-	// 4. 构建字幕 JSON（与 multi-check 相同结构）
-	subJSON, err := json.Marshal(map[string]any{"subtitles": entries})
-	if err != nil {
-		return "", fmt.Errorf("序列化字幕JSON失败: %w", err)
+	// 4. 构建字幕 JSON
+	// 若同目录存在样式字幕 JSON，则优先使用并包含样式；否则从 SRT 生成样式 JSON。
+	dir := filepath.Dir(srtPath)
+	var subJSON []byte
+	entryCount := 0
+	usedStyled := false
+	for _, name := range []string{"styled_subtitles.json", "subtitles_styled.json", "subtitles_rich.json"} {
+		p := filepath.Join(dir, name)
+		if _, statErr := os.Stat(p); statErr == nil {
+			// 直接读取并使用用户提供的带样式 JSON（保持原格式：含 font_* 等顶层字段与 body[from/to/content]）
+			raw, rErr := os.ReadFile(p)
+			if rErr != nil {
+				logger.Warn().Str("styled_json_path", p).Err(rErr).Msg("读取样式字幕JSON失败，回退使用 SRT 转换结果")
+				break
+			}
+			// 尝试解析以获取条目数量与样式参数（用于日志）
+			var styleMeta subtitle.StyledSubtitleJSON
+			if jErr := json.Unmarshal(raw, &styleMeta); jErr == nil {
+				entryCount = len(styleMeta.Body)
+				subJSON = raw
+				usedStyled = true
+				logger.Info().
+					Str("styled_json_path", p).
+					Int("entry_count", entryCount).
+					Float64("font_size", styleMeta.FontSize).
+					Str("font_color", styleMeta.FontColor).
+					Float64("background_alpha", styleMeta.BackgroundAlpha).
+					Str("background_color", styleMeta.BackgroundColor).
+					Str("stroke", styleMeta.Stroke).
+					Msg("使用带样式的字幕 JSON（原样上传）")
+				// 落盘调试文件（标准化缩进）
+				if pretty, iErr := json.MarshalIndent(styleMeta, "", "  "); iErr == nil {
+					debugPath := filepath.Join(dir, "subtitle_entries_full.json")
+					_ = os.WriteFile(debugPath, pretty, 0644)
+					logger.Info().Str("debug_path", debugPath).Msg("已保存完整字幕（带样式）用于调试")
+				}
+			} else {
+				logger.Warn().Str("styled_json_path", p).Err(jErr).Msg("解析样式字幕JSON失败，回退使用 SRT 转换结果")
+			}
+			break
+		}
+	}
+	if !usedStyled {
+		// 从 SRT 生成带样式 JSON（包含 from/to/location 与全局样式）
+		defaults := subtitle.StyledDefaults{
+			FontSize:        0.4,
+			FontColor:       "#FFFFFF",
+			BackgroundAlpha: 0.5,
+			BackgroundColor: "#9C27B0",
+			Stroke:          "none",
+			Location:        2,
+		}
+		if styled, cErr := subtitle.ConvertSRTToStyledJSON(srtPath, defaults); cErr == nil {
+			if b, mErr := json.Marshal(styled); mErr == nil {
+				subJSON = b
+				entryCount = len(styled.Body)
+				// 保存完整 entries 到文件（带样式）
+				if pretty, iErr := json.MarshalIndent(styled, "", "  "); iErr == nil {
+					debugPath := filepath.Join(dir, "subtitle_entries_full.json")
+					_ = os.WriteFile(debugPath, pretty, 0644)
+					logger.Info().Str("debug_path", debugPath).Msg("已保存完整字幕（SRT→带样式）用于调试")
+				}
+				usedStyled = true
+				logger.Info().Int("entry_count", entryCount).Msg("已从 SRT 生成带样式字幕 JSON")
+			} else {
+				return "", fmt.Errorf("序列化样式字幕JSON失败: %w", mErr)
+			}
+		} else {
+			return "", fmt.Errorf("从 SRT 生成样式字幕JSON失败: %w", cErr)
+		}
 	}
 
 	// 5. 直传 OSS（multipart/form-data）
@@ -916,6 +1110,34 @@ func (u *httpUploader) uploadSubtitles(ctx context.Context, subtitlePaths []stri
 	ossReq.Header.Set("Content-Type", writer.FormDataContentType())
 	// OSS 请求不强制需要 B站 Cookie，但保留通用 headers
 	u.setHeaders(ossReq)
+	// 打印字幕直传的请求详情（敏感字段做掩码）
+	jsonMD5 := fmt.Sprintf("%x", md5.Sum(subJSON))
+	policyPreview := previewForLog(policy, 48)
+	signaturePreview := previewForLog(signature, 6)
+	accessKeyPreview := previewForLog(accessKey, 6)
+	formContentTypeField := "application/octet-stream"
+	hostName := ""
+	if ossReq.URL != nil {
+		hostName = ossReq.URL.Host
+	}
+	logger.Info().
+		Str("method", ossReq.Method).
+		Str("url", ossReq.URL.String()).
+		Str("host", hostName).
+		Str("content_type", ossReq.Header.Get("Content-Type")).
+		Int("content_length", buf.Len()).
+		Str("form_key", key).
+		Str("form_access_key_id_masked", accessKeyPreview).
+		Str("form_policy_preview", policyPreview).
+		Str("form_signature_masked", signaturePreview).
+		Str("success_action_status", successStatus).
+		Str("form_content_type_field", formContentTypeField).
+		Int("subtitle_json_size", len(subJSON)).
+		Str("subtitle_json_preview", previewForLog(string(subJSON), 400)).
+		Str("subtitle_json_md5", jsonMD5).
+		Str("referer", ossReq.Header.Get("Referer")).
+		Str("origin", ossReq.Header.Get("Origin")).
+		Msg("字幕直传请求详情")
 	ossResp, err := u.httpClient.Do(ossReq)
 	if err != nil {
 		return "", fmt.Errorf("字幕直传失败: %w", err)
@@ -1199,6 +1421,7 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 		Str("cover", coverURL).
 		Str("subtitle_url", subtitleURL).
 		Bool("has_subtitle", subtitleURL != "").
+		Str("api_url", apiURL).
 		Msg("准备发布视频")
 
 	jsonData, err := json.Marshal(publishData)
@@ -1211,7 +1434,7 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 	if len(requestPreview) > 1000 {
 		requestPreview = requestPreview[:1000] + "..."
 	}
-	logger.Debug().Str("request_body", requestPreview).Msg("发布视频请求体（预览）")
+	logger.Info().Str("request_body", requestPreview).Msg("发布视频请求体（预览）")
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(jsonData))
 	if err != nil {
@@ -1221,6 +1444,15 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 	u.setCookies(req)
 	u.setHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
+	// 打印发布请求的头与 URL
+	logger.Info().
+		Str("method", req.Method).
+		Str("url", req.URL.String()).
+		Str("content_type", req.Header.Get("Content-Type")).
+		Str("referer", req.Header.Get("Referer")).
+		Str("origin", req.Header.Get("Origin")).
+		Str("cookie_header", maskCookieHeader(req.Header.Get("Cookie"))).
+		Msg("发布视频请求详情")
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
