@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"blueberry/internal/app"
 	"blueberry/internal/config"
@@ -19,6 +20,8 @@ var (
 	uploadChannel    string
 	uploadChannelDir string
 	uploadAll        bool
+	uploadWatch      bool
+	uploadIntervalM  int
 )
 
 var uploadCmd = &cobra.Command{
@@ -44,32 +47,59 @@ var uploadCmd = &cobra.Command{
 
 		// 如果指定了 --all，上传所有频道
 		if uploadAll {
-			logger.Info().Msg("开始上传所有频道")
-			if err := application.UploadService.UploadAllChannels(ctx); err != nil {
-				logger.Error().Err(err).Msg("上传所有频道失败")
-				os.Exit(1)
+			for {
+				logger.Info().Msg("开始上传所有频道")
+				if err := application.UploadService.UploadAllChannels(ctx); err != nil {
+					logger.Error().Err(err).Msg("上传所有频道失败")
+					if !uploadWatch {
+						os.Exit(1)
+					}
+				}
+				if !uploadWatch {
+					return
+				}
+				interval := time.Duration(uploadIntervalM) * time.Minute
+				logger.Info().Dur("sleep", interval).Msg("本轮上传完成，进入休眠等待下一轮")
+				time.Sleep(interval)
 			}
-			return
 		}
 
 		// 如果指定了 --channel，上传指定频道（URL）
 		if uploadChannel != "" {
-			logger.Info().Str("channel", uploadChannel).Msg("开始上传频道")
-			if err := application.UploadService.UploadChannel(ctx, uploadChannel); err != nil {
-				logger.Error().Err(err).Str("channel", uploadChannel).Msg("上传频道失败")
-				os.Exit(1)
+			for {
+				logger.Info().Str("channel", uploadChannel).Msg("开始上传频道")
+				if err := application.UploadService.UploadChannel(ctx, uploadChannel); err != nil {
+					logger.Error().Err(err).Str("channel", uploadChannel).Msg("上传频道失败")
+					if !uploadWatch {
+						os.Exit(1)
+					}
+				}
+				if !uploadWatch {
+					return
+				}
+				interval := time.Duration(uploadIntervalM) * time.Minute
+				logger.Info().Dur("sleep", interval).Msg("本轮上传完成，进入休眠等待下一轮")
+				time.Sleep(interval)
 			}
-			return
 		}
 
 		// 如果指定了 --channel-dir，上传本地频道目录
 		if uploadChannelDir != "" {
-			logger.Info().Str("channel_dir", uploadChannelDir).Msg("开始上传频道目录")
-			if err := application.UploadService.UploadChannelDir(ctx, uploadChannelDir); err != nil {
-				logger.Error().Err(err).Str("channel_dir", uploadChannelDir).Msg("上传频道目录失败")
-				os.Exit(1)
+			for {
+				logger.Info().Str("channel_dir", uploadChannelDir).Msg("开始上传频道目录")
+				if err := application.UploadService.UploadChannelDir(ctx, uploadChannelDir); err != nil {
+					logger.Error().Err(err).Str("channel_dir", uploadChannelDir).Msg("上传频道目录失败")
+					if !uploadWatch {
+						os.Exit(1)
+					}
+				}
+				if !uploadWatch {
+					return
+				}
+				interval := time.Duration(uploadIntervalM) * time.Minute
+				logger.Info().Dur("sleep", interval).Msg("本轮上传完成，进入休眠等待下一轮")
+				time.Sleep(interval)
 			}
-			return
 		}
 
 		// 否则，上传单个视频
@@ -89,8 +119,19 @@ var uploadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		if err := application.UploadService.UploadSingleVideo(ctx, uploadVideoPath, accountName); err != nil {
-			os.Exit(1)
+		for {
+			if err := application.UploadService.UploadSingleVideo(ctx, uploadVideoPath, accountName); err != nil {
+				if !uploadWatch {
+					os.Exit(1)
+				}
+				logger.Error().Err(err).Str("video_dir", uploadVideoPath).Msg("单视频上传失败")
+			}
+			if !uploadWatch {
+				return
+			}
+			interval := time.Duration(uploadIntervalM) * time.Minute
+			logger.Info().Dur("sleep", interval).Msg("本轮上传完成，进入休眠等待下一轮")
+			time.Sleep(interval)
 		}
 	},
 }
@@ -101,4 +142,6 @@ func init() {
 	uploadCmd.Flags().StringVar(&uploadChannel, "channel", "", "要上传的频道URL（频道模式）")
 	uploadCmd.Flags().StringVar(&uploadChannelDir, "channel-dir", "", "要上传的本地频道目录（频道模式）")
 	uploadCmd.Flags().BoolVar(&uploadAll, "all", false, "上传配置文件中所有频道（全部频道模式）")
+	uploadCmd.Flags().BoolVar(&uploadWatch, "watch", false, "持续循环上传；每轮结束后休眠并再次扫描上传")
+	uploadCmd.Flags().IntVar(&uploadIntervalM, "interval-minutes", 5, "watch 模式的每轮间隔（分钟）")
 }

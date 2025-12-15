@@ -92,6 +92,14 @@ var syncCmd = &cobra.Command{
 				// 目录使用 videoID（与下载服务一致）
 				videoDir := filepath.Join(channelDir, videoID)
 
+				// 如果已上传，直接跳过（避免不必要的下载与上传）
+				if fileRepo.IsVideoUploaded(videoDir) {
+					logger.Info().
+						Str("video_dir", videoDir).
+						Msg("该视频已上传（upload_status.json=completed），跳过下载与上传")
+					continue
+				}
+
 				// 先下载该视频（包含字幕/缩略图等按需步骤）
 				if err := application.DownloadService.DownloadVideoDir(ctx, videoDir); err != nil {
 					if errors.Is(err, youtube.ErrBotDetection) || strings.Contains(err.Error(), "bot detection") {
