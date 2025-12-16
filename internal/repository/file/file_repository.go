@@ -80,6 +80,8 @@ type Repository interface {
 	GetTodayUploadCount(account string) (int, error)
 	IncrementTodayUploadCount(account string) error
 	LoadTodayUploadCounts() (map[string]int, error)
+	// 获取视频下载状态（status/downloaded/error）
+	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
 }
 
 // VideoInfo 视频信息结构，用于保存到JSON文件
@@ -628,6 +630,35 @@ func (r *repository) IsThumbnailDownloaded(videoDir string) bool {
 		return thumbnail
 	}
 	return false
+}
+
+// GetDownloadVideoStatus 返回视频下载状态、downloaded 标志与错误信息
+func (r *repository) GetDownloadVideoStatus(videoDir string) (string, bool, string, error) {
+	statusFile := filepath.Join(videoDir, "download_status.json")
+	data, err := os.ReadFile(statusFile)
+	if err != nil {
+		return "", false, "", err
+	}
+	var status map[string]interface{}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return "", false, "", err
+	}
+	if video, ok := status["video"].(map[string]interface{}); ok {
+		st := ""
+		if s, ok := video["status"].(string); ok {
+			st = s
+		}
+		dl := false
+		if d, ok := video["downloaded"].(bool); ok {
+			dl = d
+		}
+		errMsg := ""
+		if e, ok := video["error"].(string); ok {
+			errMsg = e
+		}
+		return st, dl, errMsg, nil
+	}
+	return "", false, "", nil
 }
 
 // MarkVideoDownloaded 标记视频已下载完成

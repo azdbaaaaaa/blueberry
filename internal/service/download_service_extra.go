@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"blueberry/internal/config"
@@ -69,7 +70,23 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 			Str("title", title).
 			Msg("处理视频")
 
+		// 若之前被标记为“不可下载”，按配置决定是否跳过
+		videoDir := filepath.Join(channelDir, videoID)
+		if st, dl, errMsg, e := s.fileManager.GetDownloadVideoStatus(videoDir); e == nil {
+			if !s.cfg.YouTube.ForceDownloadUndownloadable && st == "failed" && !dl &&
+				(strings.Contains(errMsg, "不可下载") || strings.Contains(errMsg, "未找到可用格式")) {
+				logger.Warn().
+					Str("video_id", videoID).
+					Str("video_dir", videoDir).
+					Str("error", errMsg).
+					Msg("此前标记为不可下载，按配置跳过此视频（可开启 youtube.force_download_undownloadable 强制下载）")
+				continue
+			}
+		}
+
 		// 使用统一的下载逻辑
+		// 判断调用前后是否真的触发了下载（用于决定是否添加间隔）
+		downloadedBefore := s.fileManager.IsVideoDownloaded(videoDir)
 		if err := s.downloadVideoAndSaveInfo(ctx, channelID, videoID, title, url, languages, videoMap); err != nil {
 			logger.Error().
 				Str("video_id", videoID).
@@ -81,7 +98,8 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 
 		// 在下载每个视频后添加延迟，避免触发 429 错误
 		// 字幕下载已经通过 --sleep-subtitles 参数添加了延迟，这里再添加一个整体延迟
-		if i < len(videoMaps)-1 {
+		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
+		if i < len(videoMaps)-1 && downloadedAfter && !downloadedBefore {
 			delay := 3 * time.Second
 			logger.Debug().Dur("delay", delay).Msg("下载完成，等待后继续下一个视频")
 			time.Sleep(delay)
@@ -181,6 +199,19 @@ func (s *downloadService) DownloadVideoDir(ctx context.Context, videoDir string)
 	videoURL := videoInfo.URL
 	if videoURL == "" {
 		videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+	}
+
+	// 若之前被标记为“不可下载”，按配置决定是否跳过（单视频目录模式）
+	if st, dl, errMsg, e := s.fileManager.GetDownloadVideoStatus(videoDir); e == nil {
+		if !s.cfg.YouTube.ForceDownloadUndownloadable && st == "failed" && !dl &&
+			(strings.Contains(errMsg, "不可下载") || strings.Contains(errMsg, "未找到可用格式")) {
+			logger.Warn().
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Str("error", errMsg).
+				Msg("此前标记为不可下载，按配置跳过此视频（可开启 youtube.force_download_undownloadable 强制下载）")
+			return nil
+		}
 	}
 
 	return s.downloadVideoAndSaveInfo(ctx, channelID, videoID, videoInfo.Title, videoURL, languages, rawData)

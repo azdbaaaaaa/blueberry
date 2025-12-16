@@ -60,7 +60,21 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		return nil, err
 	}
 
-	args := d.buildDownloadArgs(videoDir, videoURL, languages)
+	// 在下载前用 --list-formats 探测可用的 player_client（优先 android，回退 web）
+	chosenClient, probeOut, probeErr := d.choosePlayerClient(ctx, videoURL)
+	if probeErr != nil {
+		// 不作为强制判断依据：探测失败时仍尝试 android,web 组合，避免误判导致历史可下载视频失败
+		logger.Warn().
+			Err(probeErr).
+			Str("video_url", videoURL).
+			Str("probe_output_preview", previewForLog(probeOut, 600)).
+			Msg("list-formats 探测未找到可用格式，将直接尝试 player_client=android,web")
+		chosenClient = "android,web"
+	} else {
+		logger.Info().Str("player_client", chosenClient).Msg("已选择可用的 player_client")
+	}
+
+	args := d.buildDownloadArgs(videoDir, videoURL, languages, chosenClient)
 
 	// 记录完整的命令（用于调试）
 	fullCommand := "yt-dlp " + strings.Join(args, " ")
@@ -181,7 +195,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 	return nil, fmt.Errorf("下载失败: %w, 输出: %s", lastErr, lastOutput)
 }
 
-func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string) []string {
+func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string, playerClient string) []string {
 	args := []string{
 		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
 		// 强制 IPv4，规避部分网络环境问题
@@ -190,7 +204,7 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 
 	// 恢复之前移除的参数：更接近真实浏览器环境与稳定客户端组合
 	args = append(args,
-		"--extractor-args", "youtube:player_client=android,web",
+		"--extractor-args", fmt.Sprintf("youtube:player_client=%s", playerClient),
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/131.0.0.0 Safari/537.36",
 		"--referer", "https://www.youtube.com/",
 		"--add-header", "Accept-Language:en-US,en;q=0.9",
@@ -281,6 +295,70 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 	args = append(args, videoURL)
 
 	return args
+}
+
+// choosePlayerClient 通过 yt-dlp --list-formats 预探测可用的 player_client
+// 优先 android，若 android 不可用则回退 web；都不可用返回错误
+func (d *downloader) choosePlayerClient(ctx context.Context, videoURL string) (string, string, error) {
+	candidates := []string{"android", "web"}
+	var lastOut string
+	for _, client := range candidates {
+		args := []string{
+			"--force-ipv4",
+			"--list-formats",
+			"--extractor-args", fmt.Sprintf("youtube:player_client=%s", client),
+		}
+		// cookies
+		if d.cookiesFile != "" {
+			cookiesPath := d.cookiesFile
+			if !filepath.IsAbs(cookiesPath) {
+				if absPath, err := filepath.Abs(cookiesPath); err == nil {
+					cookiesPath = absPath
+				}
+			}
+			args = append(args, "--cookies", cookiesPath)
+		} else if d.cookiesFromBrowser != "" {
+			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
+		}
+		args = append(args, videoURL)
+		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+		output, err := cmd.CombinedOutput()
+		outStr := string(output)
+		lastOut = outStr
+		if err != nil {
+			logger.Warn().
+				Str("client", client).
+				Err(err).
+				Str("output_preview", previewForLog(outStr, 600)).
+				Msg("list-formats 失败，尝试下一个 client")
+			continue
+		}
+		// 简单可用性判定：包含“Available formats”且出现 mp4/m3u8/dash 关键字
+		if strings.Contains(outStr, "Available formats") &&
+			(strings.Contains(outStr, " mp4 ") || strings.Contains(outStr, "m3u8") || strings.Contains(outStr, "dash")) {
+			// 额外记录若出现 SABR 提示
+			if strings.Contains(outStr, "SABR") || strings.Contains(outStr, "nsig extraction failed") {
+				logger.Warn().Str("client", client).Msg("list-formats 提示 SABR 或 nsig 警告，仍尝试该 client")
+			}
+			return client, outStr, nil
+		}
+		logger.Warn().
+			Str("client", client).
+			Str("output_preview", previewForLog(outStr, 600)).
+			Msg("list-formats 未发现可用格式，尝试下一个 client")
+	}
+	return "", lastOut, fmt.Errorf("no usable formats for android/web")
+}
+
+func previewForLog(s string, limit int) string {
+	if limit <= 0 || s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "..."
 }
 
 // buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）

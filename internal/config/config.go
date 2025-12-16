@@ -58,6 +58,9 @@ type YouTubeConfig struct {
 	// CookiesFile cookies 文件路径（Netscape 格式或 JSON 格式）
 	// 如果设置了此选项，会使用 --cookies 参数
 	CookiesFile string `mapstructure:"cookies_file"`
+	// ForceDownloadUndownloadable 当之前被标记为“不可下载”时，是否仍强制尝试下载
+	// 默认 false：跳过这些视频；true：继续尝试下载
+	ForceDownloadUndownloadable bool `mapstructure:"force_download_undownloadable"`
 }
 
 // LoggingConfig 控制日志级别与输出路径
@@ -99,6 +102,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("channel.generate_pending_downloads", false)
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
+	viper.SetDefault("youtube.force_download_undownloadable", false)
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)
