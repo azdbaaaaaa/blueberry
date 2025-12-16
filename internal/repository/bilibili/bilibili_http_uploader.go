@@ -95,6 +95,38 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		return nil, fmt.Errorf("文件检查失败: %w", err)
 	}
 
+	// 1.1 先上传封面图；封面失败则直接跳过该视频
+	var coverURL string
+	{
+		// 查找封面文件路径（cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）
+		dir := filepath.Dir(videoPath)
+		coverPath := ""
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+			p := filepath.Join(dir, "cover"+ext)
+			if _, statErr := os.Stat(p); statErr == nil {
+				coverPath = p
+				break
+			}
+		}
+		if coverPath == "" {
+			thumb := filepath.Join(dir, "thumbnail.jpg")
+			if _, statErr := os.Stat(thumb); statErr == nil {
+				coverPath = thumb
+				logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图")
+			}
+		}
+		if coverPath == "" {
+			return nil, fmt.Errorf("未找到封面图文件（需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）")
+		}
+		coverURL, err = u.uploadCover(ctx, coverPath, actualVideoPath)
+		if err != nil {
+			// 明确日志并跳过该视频
+			logger.Error().Err(err).Str("video_path", actualVideoPath).Msg("封面图上传失败，跳过该视频")
+			return nil, fmt.Errorf("封面图上传失败，跳过该视频: %w", err)
+		}
+		logger.Info().Str("cover_url", coverURL).Msg("封面图上传完成（优先）")
+	}
+
 	// 2. 先上传字幕（如失败仅警告继续）
 	var subtitleURL string
 	if len(subtitlePaths) > 0 {
@@ -128,37 +160,6 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		return nil, fmt.Errorf("上传视频失败: %w", err)
 	}
 	logger.Info().Str("filename", filename).Msg("视频上传完成")
-
-	// 4. 上传封面图（现在为必需）
-	var coverURL string
-	// 支持多种 cover 扩展名；若无，则尝试 thumbnail.jpg
-	dir := filepath.Dir(videoPath)
-	coverPath := ""
-	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
-		p := filepath.Join(dir, "cover"+ext)
-		if _, statErr := os.Stat(p); statErr == nil {
-			coverPath = p
-			break
-		}
-	}
-	if coverPath == "" {
-		thumb := filepath.Join(dir, "thumbnail.jpg")
-		if _, statErr := os.Stat(thumb); statErr == nil {
-			coverPath = thumb
-			logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图")
-		}
-	}
-	if coverPath == "" {
-		return nil, fmt.Errorf("未找到封面图文件（需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）")
-	}
-	if _, err := os.Stat(coverPath); err == nil {
-		coverURL, err = u.uploadCover(ctx, coverPath, actualVideoPath)
-		if err != nil {
-			return nil, fmt.Errorf("上传封面图失败: %w", err)
-		} else {
-			logger.Info().Str("cover_url", coverURL).Msg("封面图上传完成")
-		}
-	}
 
 	// 5. 发布视频
 	// 注意：发布时 filename 不应该包含 .mp4 后缀

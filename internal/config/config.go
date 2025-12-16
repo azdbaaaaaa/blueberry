@@ -61,6 +61,9 @@ type YouTubeConfig struct {
 	// ForceDownloadUndownloadable 当之前被标记为“不可下载”时，是否仍强制尝试下载
 	// 默认 false：跳过这些视频；true：继续尝试下载
 	ForceDownloadUndownloadable bool `mapstructure:"force_download_undownloadable"`
+	// MinHeight 限制视频下载的最低分辨率高度（像素），严格限制；若达不到则失败
+	// 默认 1080
+	MinHeight int `mapstructure:"min_height"`
 }
 
 // LoggingConfig 控制日志级别与输出路径
@@ -103,6 +106,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
 	viper.SetDefault("youtube.force_download_undownloadable", false)
+	viper.SetDefault("youtube.min_height", 1080)
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)

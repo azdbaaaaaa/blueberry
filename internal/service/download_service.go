@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -657,7 +658,7 @@ func (s *downloadService) DownloadSingleVideo(ctx context.Context, videoURL stri
 		"--dump-json",
 		"--no-warnings",
 		"--skip-download",
-		"--extractor-args", "youtube:player_client=android,web",
+		"--extractor-args", "youtube:player_client=default,mweb,android",
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
 	// 优先使用 cookies 文件（服务器上可能没有浏览器）
@@ -1136,6 +1137,36 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		}
 	}
 
+	// 若封面分辨率低于阈值，则改为从视频首帧生成高清封面（前提：已下载视频）
+	minHeight := 1080
+	if s.cfg != nil && s.cfg.YouTube.MinHeight > 0 {
+		minHeight = s.cfg.YouTube.MinHeight
+	}
+	if videoPath != "" {
+		// 检测是否已有 cover（可能是多种扩展名）
+		candidateExts := []string{".jpg", ".jpeg", ".png", ".webp", ".gif"}
+		for _, ext := range candidateExts {
+			p := filepath.Join(videoDir, "cover"+ext)
+			if _, err := os.Stat(p); err == nil {
+				// 使用 ffprobe 获取分辨率
+				if w, h, ok := s.detectImageResolution(p); ok {
+					if h < minHeight {
+						logger.Warn().
+							Str("cover_path", p).
+							Int("width", w).
+							Int("height", h).
+							Int("min_height", minHeight).
+							Msg("封面分辨率低于阈值，改用视频首帧生成高清封面")
+						if err := s.generateCoverFromVideo(ctx, videoDir, videoPath); err != nil {
+							logger.Warn().Err(err).Msg("从视频生成高清封面失败，保留低分辨率封面")
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
 	// ========== 步骤 5: 保存视频信息 ==========
 	// 只有在视频真正下载完成（或已存在）时才保存完整的视频信息
 	// 这样可以避免在解析阶段就保存信息，导致后续误判为已下载
@@ -1196,8 +1227,53 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 		return "", nil
 	}
 
-	// 下载最后一个缩略图（通常是最高质量的）
-	thumbnail := thumbnails[len(thumbnails)-1]
+	// 选择高清缩略图：优先以下分辨率（从高到低），否则选择面积最大的
+	preferred := [][2]int{
+		{7680, 4320},
+		{3840, 2160},
+		{2560, 1440},
+		{2048, 1152},
+		{1920, 1080},
+		{1600, 900},
+		{1280, 720},
+	}
+	chosen := file.Thumbnail{}
+	// 先尝试匹配首选清单
+	foundPreferred := false
+	for _, wh := range preferred {
+		for _, t := range thumbnails {
+			if t.Width == wh[0] && t.Height == wh[1] && t.URL != "" {
+				chosen = t
+				foundPreferred = true
+				break
+			}
+		}
+		if foundPreferred {
+			break
+		}
+	}
+	// 若未命中首选清单，则选面积最大的有效项
+	if !foundPreferred {
+		maxArea := -1
+		for _, t := range thumbnails {
+			if t.URL == "" {
+				continue
+			}
+			area := t.Width * t.Height
+			if area > maxArea {
+				maxArea = area
+				chosen = t
+			}
+		}
+	}
+	thumbnail := chosen
+	if thumbnail.Width > 0 && thumbnail.Height > 0 {
+		logger.Info().
+			Int("width", thumbnail.Width).
+			Int("height", thumbnail.Height).
+			Str("url", thumbnail.URL).
+			Msg("选定高清封面分辨率")
+	}
 	if thumbnail.URL == "" {
 		return "", nil
 	}
@@ -1345,6 +1421,41 @@ func (s *downloadService) detectImageExtension(filePath string) string {
 
 	// 未识别为图片
 	return ""
+}
+
+// detectImageResolution 使用 ffprobe 获取图片分辨率（宽、高）
+// 依赖本地存在 ffprobe；若不可用或解析失败，返回 ok=false
+func (s *downloadService) detectImageResolution(filePath string) (int, int, bool) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		return 0, 0, false
+	}
+	// ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 file
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=width,height",
+		"-of", "csv=s=x:p=0",
+		filePath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, 0, false
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" || !strings.Contains(line, "x") {
+		return 0, 0, false
+	}
+	parts := strings.Split(line, "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	// 解析为整数
+	w, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	h, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // generateCoverFromVideo 从视频第一帧生成封面图

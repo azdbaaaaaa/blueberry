@@ -60,36 +60,45 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		return nil, err
 	}
 
-	// 在下载前用 --list-formats 探测可用的 player_client（优先 android，回退 web）
-	chosenClient, probeOut, probeErr := d.choosePlayerClient(ctx, videoURL)
-	if probeErr != nil {
-		// 不作为强制判断依据：探测失败时仍尝试 android,web 组合，避免误判导致历史可下载视频失败
-		logger.Warn().
-			Err(probeErr).
-			Str("video_url", videoURL).
-			Str("probe_output_preview", previewForLog(probeOut, 600)).
-			Msg("list-formats 探测未找到可用格式，将直接尝试 player_client=android,web")
-		chosenClient = "android,web"
-	} else {
-		logger.Info().Str("player_client", chosenClient).Msg("已选择可用的 player_client")
+	// 下载策略顺序：
+	// 0) 最小化参数 → 1) web 无 cookies → 2) 休眠3s后 web 带 cookies → 3) 休眠3s后 android 无 cookies
+	type tryConf struct {
+		client        string
+		includeCookie bool
+		sleepBefore   time.Duration
+		minimal       bool
+	}
+	tries := []tryConf{
+		// 预先最小化尝试（不加 cookies/UA/headers）
+		{client: "web", includeCookie: false, sleepBefore: 0, minimal: true},
+		{client: "web", includeCookie: false, sleepBefore: 0},
+		{client: "web", includeCookie: true, sleepBefore: 3 * time.Second},
+		{client: "android", includeCookie: false, sleepBefore: 3 * time.Second},
 	}
 
-	args := d.buildDownloadArgs(videoDir, videoURL, languages, chosenClient)
-
-	// 记录完整的命令（用于调试）
-	fullCommand := "yt-dlp " + strings.Join(args, " ")
-	logger.Debug().
-		Str("command", fullCommand).
-		Str("video_url", videoURL).
-		Str("video_dir", videoDir).
-		Msg("执行下载命令")
-
-	// 智能重试机制：区分认证错误和网络错误
-	maxRetries := 3
 	var lastErr error
 	var lastOutput string
+	for i, t := range tries {
+		if t.sleepBefore > 0 {
+			time.Sleep(t.sleepBefore)
+		}
+		var args []string
+		if t.minimal {
+			minHeight := 1080
+			if cfg := config.Get(); cfg != nil && cfg.YouTube.MinHeight > 0 {
+				minHeight = cfg.YouTube.MinHeight
+			}
+			args = d.buildMinimalArgs(videoDir, videoURL, languages, minHeight, false)
+		} else {
+			args = d.buildDownloadArgs(videoDir, videoURL, languages, t.client, t.includeCookie)
+		}
+		logger.Debug().
+			Int("strategy_index", i+1).
+			Str("client", t.client).
+			Bool("with_cookies", t.includeCookie).
+			Str("command", "yt-dlp "+strings.Join(args, " ")).
+			Msg("执行下载命令（按策略）")
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
 		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 		output, err := cmd.CombinedOutput()
 		outputStr := string(output)
@@ -109,6 +118,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				d.cleanupFrameSrtFiles(videoDir)
 				// 如果下载的是 VTT 格式，尝试转换为 SRT
 				result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
+				// 去除字幕文件名中的分辨率标识（例如: id_1080p.en.srt -> id.en.srt）
+				result.SubtitlePaths = d.stripResolutionFromSubtitleFilenames(videoDir, result.SubtitlePaths)
 				// 检查字幕时间轴重叠（受配置开关控制）
 				if cfg := config.Get(); cfg != nil && cfg.Subtitles.AutoFixOverlap {
 					for _, subPath := range result.SubtitlePaths {
@@ -137,30 +148,37 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		if strings.Contains(outputStr, "Sign in to confirm you're not a bot") ||
 			strings.Contains(outputStr, "confirm you're not a bot") ||
 			strings.Contains(outputStr, "authentication") {
-			// 直接返回，交由上层立即退出程序
-			logger.Error().
-				Str("video_url", videoURL).
-				Str("video_dir", videoDir).
-				Msg("检测到 bot detection，终止流程")
-			return nil, fmt.Errorf("%w: %s", ErrBotDetection, "Sign in to confirm you're not a bot")
+			// 不立即中止，尝试下一种策略
+			logger.Warn().
+				Int("strategy_index", i+1).
+				Str("client", t.client).
+				Bool("with_cookies", t.includeCookie).
+				Msg("检测到 bot detection，继续尝试下一种策略")
+			continue
 		}
 
-		// 其他错误（网络错误等），可以重试
+		// 获取退出码（若可用）
+		exitCode := -1
+		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState != nil {
+			exitCode = ee.ProcessState.ExitCode()
+		}
 		logger.Warn().
-			Int("attempt", attempt).
-			Int("max_retries", maxRetries).
-			Str("video_url", videoURL).
+			Int("strategy_index", i+1).
+			Str("client", t.client).
+			Bool("with_cookies", t.includeCookie).
+			Int("exit_code", exitCode).
+			Str("output_preview", previewForLog(outputStr, 800)).
 			Err(err).
-			Msg("下载失败，准备重试")
-
-		// 指数退避延迟
-		delay := time.Duration(attempt*2) * time.Second
-		time.Sleep(delay)
+			Msg("下载失败，继续尝试下一种策略")
 	}
 
 	// 兜底：若是“无法提取 player response”，尝试最小化参数再试一次
 	if strings.Contains(lastOutput, "Failed to extract any player response") {
-		minArgs := d.buildMinimalArgs(videoDir, videoURL, languages)
+		minHeight := 1080
+		if cfg := config.Get(); cfg != nil && cfg.YouTube.MinHeight > 0 {
+			minHeight = cfg.YouTube.MinHeight
+		}
+		minArgs := d.buildMinimalArgs(videoDir, videoURL, languages, minHeight, true)
 		logger.Info().Msg("尝试使用最小化参数进行兜底下载")
 		cmd := exec.CommandContext(ctx, "yt-dlp", minArgs...)
 		output, err := cmd.CombinedOutput()
@@ -186,7 +204,6 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 	// 所有尝试都失败了
 	logger.Error().
-		Str("command", fullCommand).
 		Str("video_url", videoURL).
 		Str("video_dir", videoDir).
 		Str("output", lastOutput).
@@ -195,57 +212,75 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 	return nil, fmt.Errorf("下载失败: %w, 输出: %s", lastErr, lastOutput)
 }
 
-func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string, playerClient string) []string {
+func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
 	args := []string{
-		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
+		// 文件名包含分辨率高度，便于后续识别（如 1080p/720p）
+		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
 		// 强制 IPv4，规避部分网络环境问题
 		"--force-ipv4",
 	}
 
-	// 恢复之前移除的参数：更接近真实浏览器环境与稳定客户端组合
-	args = append(args,
-		"--extractor-args", fmt.Sprintf("youtube:player_client=%s", playerClient),
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/131.0.0.0 Safari/537.36",
-		"--referer", "https://www.youtube.com/",
-		"--add-header", "Accept-Language:en-US,en;q=0.9",
-		"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"--add-header", "Accept-Encoding:gzip, deflate, br",
-		"--add-header", "DNT:1",
-		"--add-header", "Connection:keep-alive",
-		"--add-header", "Upgrade-Insecure-Requests:1",
-	)
+	// 根据 client 选择合适的 UA/Headers
+	uaWeb := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	// 常见 Android YouTube UA 格式；不需要完全精准，避免过于老旧
+	uaAndroid := "com.google.android.youtube/19.39.37 (Linux; U; Android 11) gzip"
+	args = append(args, "--extractor-args", fmt.Sprintf("youtube:player_client=%s", playerClient))
+	switch strings.ToLower(playerClient) {
+	case "web":
+		args = append(args,
+			"--user-agent", uaWeb,
+			"--referer", "https://www.youtube.com/",
+			"--add-header", "Accept-Language:en-US,en;q=0.9",
+			"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+			"--add-header", "Accept-Encoding:gzip, deflate, br",
+			"--add-header", "DNT:1",
+			"--add-header", "Connection:keep-alive",
+			"--add-header", "Upgrade-Insecure-Requests:1",
+		)
+	case "android":
+		args = append(args,
+			"--user-agent", uaAndroid,
+			"--referer", "https://www.youtube.com/",
+			"--add-header", "Accept: */*",
+			"--add-header", "Accept-Language: en-US",
+			"--add-header", "Connection: keep-alive",
+		)
+	default:
+		// 兜底按 web 处理
+		args = append(args,
+			"--user-agent", uaWeb,
+			"--referer", "https://www.youtube.com/",
+		)
+	}
 	// 如存在 Node，声明 JS runtime，提升兼容性
 	// if _, err := exec.LookPath("node"); err == nil {
 	// 	args = append(args, "--js-runtimes", "node")
 	// }
 
-	// 添加 cookies 支持（优先使用 cookies 文件，因为服务器上可能没有浏览器）
-	if d.cookiesFile != "" {
-		// 将相对路径转换为绝对路径，避免工作目录变化导致找不到文件
-		cookiesPath := d.cookiesFile
-		if !filepath.IsAbs(cookiesPath) {
-			// 如果是相对路径，需要相对于当前工作目录解析
-			// 注意：这里假设 cookies 文件在项目根目录或当前工作目录
-			// 如果需要更精确的路径解析，可以在初始化时传入项目根目录
-			if absPath, err := filepath.Abs(cookiesPath); err == nil {
-				cookiesPath = absPath
-				logger.Info().Str("original", d.cookiesFile).Str("resolved", cookiesPath).Msg("解析 cookies 文件路径")
-			} else {
-				logger.Error().Str("path", d.cookiesFile).Err(err).Msg("无法解析 cookies 文件路径，使用原始路径")
+	// 添加 cookies（按策略控制）
+	if includeCookies {
+		if d.cookiesFile != "" {
+			cookiesPath := d.cookiesFile
+			if !filepath.IsAbs(cookiesPath) {
+				if absPath, err := filepath.Abs(cookiesPath); err == nil {
+					cookiesPath = absPath
+					logger.Info().Str("original", d.cookiesFile).Str("resolved", cookiesPath).Msg("解析 cookies 文件路径")
+				} else {
+					logger.Error().Str("path", d.cookiesFile).Err(err).Msg("无法解析 cookies 文件路径，使用原始路径")
+				}
 			}
-		}
-		// 检查文件是否存在（使用 INFO 级别，确保能看到）
-		if fileInfo, err := os.Stat(cookiesPath); err != nil {
-			logger.Error().Str("path", cookiesPath).Err(err).Msg("cookies 文件不存在或无法访问，下载可能失败")
+			if fileInfo, err := os.Stat(cookiesPath); err != nil {
+				logger.Error().Str("path", cookiesPath).Err(err).Msg("cookies 文件不存在或无法访问，下载可能失败")
+			} else {
+				logger.Info().Str("path", cookiesPath).Int64("size", fileInfo.Size()).Msg("cookies 文件存在")
+			}
+			args = append(args, "--cookies", cookiesPath)
+		} else if d.cookiesFromBrowser != "" {
+			logger.Info().Str("browser", d.cookiesFromBrowser).Msg("使用浏览器 cookies")
+			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
 		} else {
-			logger.Info().Str("path", cookiesPath).Int64("size", fileInfo.Size()).Msg("cookies 文件存在")
+			logger.Warn().Msg("未配置 cookies，某些视频可能无法下载")
 		}
-		args = append(args, "--cookies", cookiesPath)
-	} else if d.cookiesFromBrowser != "" {
-		logger.Info().Str("browser", d.cookiesFromBrowser).Msg("使用浏览器 cookies")
-		args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
-	} else {
-		logger.Warn().Msg("未配置 cookies，某些视频可能无法下载")
 	}
 
 	// yt-dlp 支持通过 --sub-langs 指定多个语言（逗号分隔）
@@ -281,6 +316,14 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"--fragment-retries", "3", // 片段重试 3 次
 		"--skip-unavailable-fragments", // 跳过不可用的片段
 	)
+
+	// 严格最低分辨率（从配置读取），达不到则失败
+	minHeight := 1080
+	if cfg := config.Get(); cfg != nil && cfg.YouTube.MinHeight > 0 {
+		minHeight = cfg.YouTube.MinHeight
+	}
+	format := fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight)
+	args = append(args, "-f", format, "--merge-output-format", "mp4")
 
 	// 添加请求延迟参数，降低被反爬虫检测的风险
 	// --sleep-requests: 在请求之间延迟（秒），避免请求过于频繁
@@ -362,32 +405,39 @@ func previewForLog(s string, limit int) string {
 }
 
 // buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）
-func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string) []string {
+func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string, minHeight int, includeCookies bool) []string {
 	args := []string{
-		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
-		"--no-warnings",
+		// 与正式策略保持一致的文件名模板，包含分辨率高度
+		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
 		"--force-ipv4",
 	}
 	// if _, err := exec.LookPath("node"); err == nil {
 	// 	args = append(args, "--js-runtimes", "node")
 	// }
-	if d.cookiesFile != "" {
-		cookiesPath := d.cookiesFile
-		if !filepath.IsAbs(cookiesPath) {
-			if absPath, err := filepath.Abs(cookiesPath); err == nil {
-				cookiesPath = absPath
+	if includeCookies {
+		if d.cookiesFile != "" {
+			cookiesPath := d.cookiesFile
+			if !filepath.IsAbs(cookiesPath) {
+				if absPath, err := filepath.Abs(cookiesPath); err == nil {
+					cookiesPath = absPath
+				}
 			}
+			args = append(args, "--cookies", cookiesPath)
+		} else if d.cookiesFromBrowser != "" {
+			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
 		}
-		args = append(args, "--cookies", cookiesPath)
-	} else if d.cookiesFromBrowser != "" {
-		args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
 	}
 	// 字幕参数尽量保持，但不加额外延迟和转换
 	if len(languages) > 0 {
-		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", strings.Join(languages, ","))
+		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", strings.Join(languages, ","), "--convert-subs", "srt")
 	} else {
-		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all")
+		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all", "--convert-subs", "srt")
 	}
+	// 严格最低分辨率
+	if minHeight <= 0 {
+		minHeight = 1080
+	}
+	args = append(args, "-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight))
 	args = append(args, videoURL)
 	return args
 }
@@ -836,4 +886,40 @@ func (d *downloader) cleanupFrameSrtFiles(videoDir string) {
 			}
 		}
 	}
+}
+
+// stripResolutionFromSubtitleFilenames 去除字幕文件名中的分辨率标识（例如: id_1080p.en.srt -> id.en.srt）
+func (d *downloader) stripResolutionFromSubtitleFilenames(videoDir string, subtitlePaths []string) []string {
+	newPaths := make([]string, 0, len(subtitlePaths))
+	re := regexp.MustCompile(`_(\d{3,5})p(\.[A-Za-z-]+\.(srt|vtt))$`)
+	for _, p := range subtitlePaths {
+		base := filepath.Base(p)
+		dir := filepath.Dir(p)
+		if re.MatchString(base) {
+			newBase := re.ReplaceAllString(base, `$2`)
+			newPath := filepath.Join(dir, newBase)
+			// 如果目标已存在，先删除
+			if _, err := os.Stat(newPath); err == nil {
+				_ = os.Remove(newPath)
+			}
+			// 重命名文件
+			if err := os.Rename(p, newPath); err != nil {
+				logger.Warn().
+					Str("old_path", p).
+					Str("new_path", newPath).
+					Err(err).
+					Msg("重命名字幕文件去除分辨率标识失败，保留原文件名")
+				newPaths = append(newPaths, p)
+			} else {
+				logger.Info().
+					Str("old_path", p).
+					Str("new_path", newPath).
+					Msg("已去除字幕文件名中的分辨率标识")
+				newPaths = append(newPaths, newPath)
+			}
+		} else {
+			newPaths = append(newPaths, p)
+		}
+	}
+	return newPaths
 }
