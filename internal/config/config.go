@@ -64,6 +64,8 @@ type YouTubeConfig struct {
 	// MinHeight 限制视频下载的最低分辨率高度（像素），严格限制；若达不到则失败
 	// 默认 1080
 	MinHeight int `mapstructure:"min_height"`
+	// DisableAndroidFallback web 下载失败时，是否禁用回退到 android 客户端；默认 true（不回退，降低风控风险）
+	DisableAndroidFallback bool `mapstructure:"disable_android_fallback"`
 }
 
 // LoggingConfig 控制日志级别与输出路径
@@ -107,6 +109,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
 	viper.SetDefault("youtube.force_download_undownloadable", false)
 	viper.SetDefault("youtube.min_height", 1080)
+	viper.SetDefault("youtube.disable_android_fallback", true)
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)

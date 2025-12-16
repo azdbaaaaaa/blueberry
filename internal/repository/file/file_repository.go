@@ -82,6 +82,8 @@ type Repository interface {
 	LoadTodayUploadCounts() (map[string]int, error)
 	// 获取视频下载状态（status/downloaded/error）
 	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
+	// 标记是否存在（或已获得）1080p（或更高）的视频
+	SetVideoHas1080p(videoDir string, has1080p bool) error
 }
 
 // VideoInfo 视频信息结构，用于保存到JSON文件
@@ -659,6 +661,22 @@ func (r *repository) GetDownloadVideoStatus(videoDir string) (string, bool, stri
 		return st, dl, errMsg, nil
 	}
 	return "", false, "", nil
+}
+
+// SetVideoHas1080p 在 download_status.json 中记录视频是否至少达到 1080p
+func (r *repository) SetVideoHas1080p(videoDir string, has1080p bool) error {
+	return r.updateDownloadStatus(videoDir, func(status map[string]interface{}) {
+		if status["video"] == nil {
+			status["video"] = make(map[string]interface{})
+		}
+		video, ok := status["video"].(map[string]interface{})
+		if !ok {
+			video = make(map[string]interface{})
+			status["video"] = video
+		}
+		video["has_1080p"] = has1080p
+		video["has_1080p_marked_at"] = time.Now().Unix()
+	})
 }
 
 // MarkVideoDownloaded 标记视频已下载完成

@@ -61,19 +61,25 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 	}
 
 	// 下载策略顺序：
-	// 0) 最小化参数 → 1) web 无 cookies → 2) 休眠3s后 web 带 cookies → 3) 休眠3s后 android 无 cookies
+	// 0) 最小化 + best 格式（bestvideo+bestaudio/best） → 1) web 无 cookies（严格 min_height） → 2) 休眠3s后 web 带 cookies（严格 min_height） → 3) 休眠3s后 android 无 cookies（严格 min_height，可配置关闭）
 	type tryConf struct {
 		client        string
 		includeCookie bool
 		sleepBefore   time.Duration
 		minimal       bool
+		useBest       bool
 	}
 	tries := []tryConf{
-		// 预先最小化尝试（不加 cookies/UA/headers）
-		{client: "web", includeCookie: false, sleepBefore: 0, minimal: true},
-		{client: "web", includeCookie: false, sleepBefore: 0},
-		{client: "web", includeCookie: true, sleepBefore: 3 * time.Second},
-		{client: "android", includeCookie: false, sleepBefore: 3 * time.Second},
+		// 预先最小化尝试（不加 cookies/UA/headers），使用 best 格式以减少风控触发，同时拿到最高分辨率
+		{client: "web", includeCookie: false, sleepBefore: 0, minimal: true, useBest: true},
+		{client: "web", includeCookie: false, sleepBefore: 0, useBest: true},
+		{client: "web", includeCookie: true, sleepBefore: 3 * time.Second, useBest: true},
+	}
+	// 按配置决定是否添加 android 回退
+	if cfg := config.Get(); cfg == nil || !cfg.YouTube.DisableAndroidFallback {
+		tries = append(tries, tryConf{client: "android", includeCookie: false, sleepBefore: 3 * time.Second, useBest: true})
+	} else {
+		logger.Info().Msg("已启用 youtube.disable_android_fallback，跳过 android 回退策略")
 	}
 
 	var lastErr error
@@ -83,15 +89,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			time.Sleep(t.sleepBefore)
 		}
 		var args []string
-		if t.minimal {
-			minHeight := 1080
-			if cfg := config.Get(); cfg != nil && cfg.YouTube.MinHeight > 0 {
-				minHeight = cfg.YouTube.MinHeight
-			}
-			args = d.buildMinimalArgs(videoDir, videoURL, languages, minHeight, false)
-		} else {
-			args = d.buildDownloadArgs(videoDir, videoURL, languages, t.client, t.includeCookie)
-		}
+		// 统一使用 bestvideo+bestaudio/best，避免触发更深风控，由下载结果再判断是否达到 1080p
+		args = d.buildBestArgsWithClient(videoDir, videoURL, languages, t.client, t.includeCookie)
 		logger.Debug().
 			Int("strategy_index", i+1).
 			Str("client", t.client).
@@ -138,6 +137,10 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			}
 
 			result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
+			// 从文件名解析高度，标记是否至少为 1080p
+			if err := d.markHas1080p(videoDir, videoFile); err != nil {
+				logger.Warn().Err(err).Msg("标记 has_1080p 失败（忽略）")
+			}
 			return result, nil
 		}
 
@@ -226,11 +229,10 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"--write-description",
 	}
 
-	// 根据 client 选择合适的 UA/Headers
+	// 根据 client 选择合适的 UA/Headers（不再设置 --extractor-args，使用默认 client）
 	uaWeb := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	// 常见 Android YouTube UA 格式；不需要完全精准，避免过于老旧
 	uaAndroid := "com.google.android.youtube/19.39.37 (Linux; U; Android 11) gzip"
-	args = append(args, "--extractor-args", fmt.Sprintf("youtube:player_client=%s", playerClient))
 	switch strings.ToLower(playerClient) {
 	case "web":
 		args = append(args,
@@ -408,6 +410,35 @@ func previewForLog(s string, limit int) string {
 	return string(runes[:limit]) + "..."
 }
 
+// markHas1080p 依据文件名中的高度后缀或 ffprobe 结果，标记是否至少达到 1080p
+func (d *downloader) markHas1080p(videoDir string, videoPath string) error {
+	height := 0
+	base := filepath.Base(videoPath)
+	// 解析形如 *_1080p.*
+	if idx := strings.LastIndex(base, "_"); idx >= 0 {
+		rest := base[idx+1:]
+		if j := strings.Index(rest, "p."); j > 0 {
+			hstr := rest[:j]
+			if n, err := strconv.Atoi(hstr); err == nil {
+				height = n
+			}
+		}
+	}
+	// 若解析失败，可选：使用 ffprobe（仅当可用）
+	if height == 0 {
+		if _, err := exec.LookPath("ffprobe"); err == nil {
+			cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", videoPath)
+			if out, err := cmd.CombinedOutput(); err == nil {
+				txt := strings.TrimSpace(string(out))
+				if n, err := strconv.Atoi(txt); err == nil {
+					height = n
+				}
+			}
+		}
+	}
+	return d.fileRepo.SetVideoHas1080p(videoDir, height >= 1080)
+}
+
 // buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）
 func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string, minHeight int, includeCookies bool) []string {
 	args := []string{
@@ -448,6 +479,99 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 		minHeight = 1080
 	}
 	args = append(args, "-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight), "--merge-output-format", "mp4")
+	args = append(args, videoURL)
+	return args
+}
+
+// buildBestArgs 构建使用 bestvideo+bestaudio/best 的下载参数（最小化 headers）
+func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string) []string {
+	args := []string{
+		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
+		"--force-ipv4",
+		"--write-thumbnail",
+		"--convert-thumbnails", "jpg",
+		"--embed-thumbnail",
+		"--write-info-json",
+		"--write-description",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		"--referer", "https://www.youtube.com/",
+	}
+	// 字幕
+	args = append(args, "--write-sub", "--write-auto-sub", "--convert-subs", "srt")
+	if len(languages) > 0 {
+		args = append(args, "--sub-langs", strings.Join(languages, ","))
+	} else {
+		args = append(args, "--sub-langs", "all")
+	}
+	// 重试与片段参数
+	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments")
+	// best 格式，不严格限定高度
+	args = append(args, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4")
+	args = append(args, videoURL)
+	return args
+}
+
+// buildBestArgsWithClient best 格式下载，按 client/是否带 cookies 构建 UA/headers
+func (d *downloader) buildBestArgsWithClient(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
+	args := []string{
+		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
+		"--force-ipv4",
+		"--write-thumbnail",
+		"--convert-thumbnails", "jpg",
+		"--embed-thumbnail",
+		"--write-info-json",
+		"--write-description",
+	}
+	uaWeb := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	uaAndroid := "com.google.android.youtube/19.39.37 (Linux; U; Android 11) gzip"
+	switch strings.ToLower(playerClient) {
+	case "web":
+		args = append(args,
+			"--user-agent", uaWeb,
+			"--referer", "https://www.youtube.com/",
+			"--add-header", "Accept-Language:en-US,en;q=0.9",
+			"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+			"--add-header", "Accept-Encoding:gzip, deflate, br",
+			"--add-header", "DNT:1",
+			"--add-header", "Connection:keep-alive",
+			"--add-header", "Upgrade-Insecure-Requests:1",
+		)
+	case "android":
+		args = append(args,
+			"--user-agent", uaAndroid,
+			"--referer", "https://www.youtube.com/",
+			"--add-header", "Accept: */*",
+			"--add-header", "Accept-Language: en-US",
+			"--add-header", "Connection: keep-alive",
+		)
+	default:
+		args = append(args, "--user-agent", uaWeb, "--referer", "https://www.youtube.com/")
+	}
+	// cookies
+	if includeCookies {
+		if d.cookiesFile != "" {
+			cookiesPath := d.cookiesFile
+			if !filepath.IsAbs(cookiesPath) {
+				if absPath, err := filepath.Abs(cookiesPath); err == nil {
+					cookiesPath = absPath
+				}
+			}
+			args = append(args, "--cookies", cookiesPath)
+		} else if d.cookiesFromBrowser != "" {
+			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
+		}
+	}
+	// 字幕
+	args = append(args, "--write-sub", "--write-auto-sub", "--convert-subs", "srt")
+	if len(languages) > 0 {
+		args = append(args, "--sub-langs", strings.Join(languages, ","))
+	} else {
+		args = append(args, "--sub-langs", "all")
+	}
+	// 重试与片段参数
+	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments")
+	// best 格式
+	args = append(args, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4")
 	args = append(args, videoURL)
 	return args
 }

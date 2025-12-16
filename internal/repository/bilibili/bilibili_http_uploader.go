@@ -1724,7 +1724,13 @@ func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverU
 			Str("api_url", apiURL).
 			Msg("发布视频返回错误，完整 HTTP 响应和请求体已记录")
 
-		return "", fmt.Errorf("发布视频失败: HTTP %d (%s), API code=%d, message=%s", resp.StatusCode, resp.Status, result.Code, errorMsg)
+		return "", fmt.Errorf(
+			"发布视频失败: HTTP %d (%s), API code=%d, message=%s, api_url=%s, response_preview=%s, request_preview=%s, filename=%s, cover=%s, subtitle_url=%s",
+			resp.StatusCode, resp.Status, result.Code, errorMsg, apiURL,
+			previewForLog(string(bodyBytes), 1000),
+			previewForLog(string(jsonData), 1000),
+			filename, coverURL, subtitleURL,
+		)
 	}
 
 	logger.Info().Str("aid", result.Data.AID).Msg("视频发布成功")
@@ -1780,14 +1786,25 @@ func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []s
 
 	// 3. 检查封面图（必需）
 	hasCover := false
-	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
-		cp := filepath.Join(videoDir, "cover"+ext)
-		if _, err := os.Stat(cp); err == nil {
-			hasCover = true
-			logger.Info().Str("cover_path", cp).Msg("✓ 封面图文件存在")
-			break
+	// 3.1 优先与视频同名的 .jpg（yt-dlp --convert-thumbnails 生成）
+	base := strings.TrimSuffix(actualVideoPath, filepath.Ext(actualVideoPath))
+	sameName := base + ".jpg"
+	if _, err := os.Stat(sameName); err == nil {
+		hasCover = true
+		logger.Info().Str("cover_path", sameName).Msg("✓ 封面图文件存在（与视频同名 .jpg）")
+	}
+	// 3.2 其次 cover.{jpg|jpeg|png|webp|gif}
+	if !hasCover {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+			cp := filepath.Join(videoDir, "cover"+ext)
+			if _, err := os.Stat(cp); err == nil {
+				hasCover = true
+				logger.Info().Str("cover_path", cp).Msg("✓ 封面图文件存在")
+				break
+			}
 		}
 	}
+	// 3.3 最后 thumbnail.jpg
 	if !hasCover {
 		thumbnailPath := filepath.Join(videoDir, "thumbnail.jpg")
 		if _, err := os.Stat(thumbnailPath); err == nil {
@@ -1796,7 +1813,7 @@ func (u *httpUploader) validateRequiredFiles(videoPath string, subtitlePaths []s
 		}
 	}
 	if !hasCover {
-		return "", fmt.Errorf("未找到封面图文件：需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg")
+		return "", fmt.Errorf("未找到封面图文件：需要与视频同名 .jpg，或 cover.{jpg|jpeg|png|webp|gif}，或 thumbnail.jpg")
 	}
 
 	logger.Info().Msg("文件检查完成，所有必需文件都存在，可以开始上传")

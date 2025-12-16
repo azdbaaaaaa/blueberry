@@ -1005,116 +1005,37 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			}
 		}
 
-		// 获取字幕信息并更新状态
-		subtitleInfo, err := s.subtitleManager.ListSubtitles(ctx, videoURL, languages)
-		if err != nil {
-			logger.Warn().Err(err).Msg("获取字幕信息失败")
-			// 如果获取字幕信息失败，标记所有配置的语言为失败状态
-			for _, lang := range languages {
-				if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, fmt.Sprintf("获取字幕信息失败: %v", err)); err != nil {
-					logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
-				}
-				// 同时更新 pending_downloads.json
-				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
-			}
-		} else if subtitleInfo != nil {
-			downloadedLanguages := make([]string, 0)
-			subtitlePaths := make(map[string]string)
-			seenLanguages := make(map[string]bool) // 用于去重
-
-			// 获取所有字幕文件（只查找一次）
-			subtitleFiles, _ := s.fileManager.FindSubtitleFiles(videoDir)
-
-			for _, sub := range subtitleInfo.SubtitleURLs {
-				subtitleMap[sub.Language] = sub.URL
-
-				// 如果已经处理过这个语言，跳过
-				if seenLanguages[sub.Language] {
-					continue
-				}
-
-				// 优先查找已重命名的文件格式 {video_id}_{lang}.srt
-				videoID := s.fileManager.ExtractVideoID(videoURL)
-				expectedName := fmt.Sprintf("%s_%s.srt", videoID, sub.Language)
-				expectedPath := filepath.Join(videoDir, expectedName)
-
-				var foundPath string
-				// 首先检查期望的文件名
-				if _, err := os.Stat(expectedPath); err == nil {
-					foundPath = expectedPath
-				} else {
-					// 如果期望的文件不存在，查找其他格式（兼容旧格式）
-					for _, subPath := range subtitleFiles {
-						base := filepath.Base(subPath)
-						// 忽略 .frame.srt 文件
-						if strings.Contains(base, ".frame.srt") {
-							continue
-						}
-						// 检查文件名是否包含语言代码（支持 .{lang}. 和 _{lang}. 格式）
-						if strings.Contains(base, "."+sub.Language+".") ||
-							strings.Contains(base, "-"+sub.Language+".") ||
-							strings.Contains(base, "_"+sub.Language+".") {
-							foundPath = subPath
-							break
-						}
+		// 不再调用网络接口获取字幕信息；若本地仍缺某些语言，直接标记为失败
+		// 以避免统一下载后再次发起无意义的请求
+		subtitleFilesNow, _ := s.fileManager.FindSubtitleFiles(videoDir)
+		for _, lang := range languages {
+			// 期望名：{video_id}_{lang}.srt
+			expectedName := fmt.Sprintf("%s_%s.srt", videoID, lang)
+			expectedPath := filepath.Join(videoDir, expectedName)
+			found := false
+			if _, err := os.Stat(expectedPath); err == nil {
+				found = true
+			} else {
+				for _, subPath := range subtitleFilesNow {
+					base := filepath.Base(subPath)
+					if strings.Contains(base, ".frame.srt") {
+						continue
 					}
-				}
-
-				if foundPath != "" {
-					downloadedLanguages = append(downloadedLanguages, sub.Language)
-					subtitlePaths[sub.Language] = foundPath
-					seenLanguages[sub.Language] = true
-				}
-			}
-
-			// 标记已下载的字幕
-			if len(downloadedLanguages) > 0 {
-				if err := s.fileManager.MarkSubtitlesDownloadedWithPaths(videoDir, downloadedLanguages, subtitlePaths, subtitleMap); err != nil {
-					logger.Warn().Err(err).Msg("标记字幕下载状态失败")
-				} else {
-					logger.Info().Strs("languages", downloadedLanguages).Msg("字幕下载状态已保存")
-					for _, lang := range downloadedLanguages {
-						subPath := subtitlePaths[lang]
-						s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "completed", subPath)
-					}
-				}
-			}
-
-			// 检查是否有未下载的字幕（标记为失败）
-			for _, lang := range languages {
-				found := false
-				for _, downloadedLang := range downloadedLanguages {
-					if lang == downloadedLang {
+					if strings.Contains(base, "."+lang+".") ||
+						strings.Contains(base, "-"+lang+".") ||
+						strings.Contains(base, "_"+lang+".") {
 						found = true
 						break
 					}
 				}
-				if !found {
-					// 如果字幕应该存在但没有找到，标记为失败
-					// 检查是否在 subtitleInfo 中存在（YouTube 上是否有这个语言的字幕）
-					hasSubtitleURL := false
-					for _, sub := range subtitleInfo.SubtitleURLs {
-						if sub.Language == lang {
-							hasSubtitleURL = true
-							break
-						}
-					}
-
-					errorMsg := ""
-					if !hasSubtitleURL {
-						errorMsg = "该语言的字幕在 YouTube 上不存在"
-					} else {
-						errorMsg = "字幕文件未找到"
-					}
-
-					if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, errorMsg); err != nil {
-						logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
-					} else {
-						logger.Warn().Str("lang", lang).Str("error", errorMsg).Msg("字幕下载失败，已标记为失败")
-					}
-					// 同时更新 pending_downloads.json
-					s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
+			}
+			if !found {
+				if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, "统一下载后仍未找到该语言的字幕文件"); err != nil {
+					logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
+				} else {
+					logger.Warn().Str("lang", lang).Msg("字幕缺失，已标记为失败")
 				}
+				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
 			}
 		}
 	} else {
