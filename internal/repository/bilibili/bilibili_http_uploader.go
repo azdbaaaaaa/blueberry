@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -151,7 +152,7 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 		return nil, fmt.Errorf("未找到封面图文件（需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）")
 	}
 	if _, err := os.Stat(coverPath); err == nil {
-		coverURL, err = u.uploadCover(ctx, coverPath)
+		coverURL, err = u.uploadCover(ctx, coverPath, actualVideoPath)
 		if err != nil {
 			return nil, fmt.Errorf("上传封面图失败: %w", err)
 		} else {
@@ -1289,7 +1290,7 @@ func generateHash(input string) string {
 }
 
 // uploadCover 上传封面图
-func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (string, error) {
+func (u *httpUploader) uploadCover(ctx context.Context, coverPath string, videoPath string) (string, error) {
 	// 读取图片文件
 	imageData, err := os.ReadFile(coverPath)
 	if err != nil {
@@ -1383,10 +1384,205 @@ func (u *httpUploader) uploadCover(ctx context.Context, coverPath string) (strin
 	}
 
 	if result.Code != 0 {
-		return "", fmt.Errorf("上传封面图失败: code=%d, message=%s", result.Code, result.Message)
+		// 打印完整返回内容，便于排查问题
+		logger.Error().
+			Int("code", result.Code).
+			Str("message", result.Message).
+			Str("response_body", string(bodyBytes)).
+			Msg("封面图上传返回错误")
+
+		// 如果是尺寸相关错误（常见 -702），尝试自动调整尺寸后重试一次
+		if result.Code == -702 {
+			logger.Warn().Str("cover_path", coverPath).Msg("检测到封面尺寸不合规，尝试调整到 1280x720 并重试")
+			resizedPath, contentType2, rerr := upscaleCoverTo1280x720(ctx, coverPath)
+			if rerr != nil {
+				return "", fmt.Errorf("封面图尺寸调整失败: %w", rerr)
+			}
+
+			// 重新读取并上传调整后的封面
+			imageData2, r2 := os.ReadFile(resizedPath)
+			if r2 != nil {
+				return "", fmt.Errorf("读取调整后的封面图失败: %w", r2)
+			}
+			base64Data2 := base64.StdEncoding.EncodeToString(imageData2)
+			coverData2 := fmt.Sprintf("data:%s;base64,%s", contentType2, base64Data2)
+
+			var buf2 bytes.Buffer
+			writer2 := multipart.NewWriter(&buf2)
+			coverField2, c2 := writer2.CreateFormField("cover")
+			if c2 != nil {
+				return "", c2
+			}
+			if _, c2 = coverField2.Write([]byte(coverData2)); c2 != nil {
+				return "", c2
+			}
+			writer2.Close()
+
+			req2, r3 := http.NewRequestWithContext(ctx, "POST", u.buildAPIURL("/intl/videoup/web2/cover"), &buf2)
+			if r3 != nil {
+				return "", r3
+			}
+			u.setCookies(req2)
+			u.setHeaders(req2)
+			req2.Header.Set("Content-Type", writer2.FormDataContentType())
+
+			resp2, r4 := u.httpClient.Do(req2)
+			if r4 != nil {
+				return "", fmt.Errorf("上传调整后的封面图失败: %w", r4)
+			}
+			defer resp2.Body.Close()
+			bodyBytes2, _ := io.ReadAll(resp2.Body)
+			if resp2.StatusCode != 200 {
+				return "", fmt.Errorf("上传调整后的封面图失败: HTTP %d, 响应: %s", resp2.StatusCode, string(bodyBytes2))
+			}
+			var result2 struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Data    struct {
+					URL string `json:"url"`
+				} `json:"data"`
+			}
+			if jerr := json.Unmarshal(bodyBytes2, &result2); jerr != nil {
+				return "", fmt.Errorf("解析调整后封面上传响应失败: %w, 响应: %s", jerr, string(bodyBytes2))
+			}
+			if result2.Code != 0 {
+				logger.Error().Int("code", result2.Code).Str("message", result2.Message).Str("response_body", string(bodyBytes2)).Msg("调整后封面图上传返回错误")
+				// 调整后仍失败，尝试从视频第一帧截取为封面再重试
+				if videoPath != "" {
+					logger.Warn().Str("video_path", videoPath).Msg("尝试从视频第一帧生成封面并重试上传")
+					framePath, frameCT, ferr := extractCoverFromVideo(ctx, videoPath)
+					if ferr == nil {
+						if img, r := os.ReadFile(framePath); r == nil {
+							data := base64.StdEncoding.EncodeToString(img)
+							payload := fmt.Sprintf("data:%s;base64,%s", frameCT, data)
+							var b bytes.Buffer
+							w := multipart.NewWriter(&b)
+							if f, e := w.CreateFormField("cover"); e == nil {
+								_, _ = f.Write([]byte(payload))
+							}
+							_ = w.Close()
+							req3, e3 := http.NewRequestWithContext(ctx, "POST", u.buildAPIURL("/intl/videoup/web2/cover"), &b)
+							if e3 == nil {
+								u.setCookies(req3)
+								u.setHeaders(req3)
+								req3.Header.Set("Content-Type", w.FormDataContentType())
+								if resp3, doErr := u.httpClient.Do(req3); doErr == nil {
+									defer resp3.Body.Close()
+									body3, _ := io.ReadAll(resp3.Body)
+									if resp3.StatusCode == 200 {
+										var r3obj struct {
+											Code    int    `json:"code"`
+											Message string `json:"message"`
+											Data    struct {
+												URL string `json:"url"`
+											} `json:"data"`
+										}
+										if json.Unmarshal(body3, &r3obj) == nil && r3obj.Code == 0 {
+											logger.Info().Str("cover_url", r3obj.Data.URL).Str("frame_path", framePath).Msg("使用视频首帧作为封面上传成功")
+											return r3obj.Data.URL, nil
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				return "", fmt.Errorf("上传封面图失败（重试）: code=%d, message=%s, response=%s", result2.Code, result2.Message, string(bodyBytes2))
+			}
+			logger.Info().Str("cover_url", result2.Data.URL).Str("resized_path", resizedPath).Msg("封面图调整后上传成功")
+			return result2.Data.URL, nil
+		}
+
+		return "", fmt.Errorf("上传封面图失败: code=%d, message=%s, response=%s", result.Code, result.Message, string(bodyBytes))
 	}
 
 	return result.Data.URL, nil
+}
+
+// upscaleCoverTo1280x720 使用 ffmpeg 将封面图调整为 1280x720（保持比例，居中填充）
+// 优先保持原格式（jpg/jpeg/png/webp），否则回退到 jpg。返回输出路径与 content-type。
+func upscaleCoverTo1280x720(ctx context.Context, inPath string) (string, string, error) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", "", fmt.Errorf("未检测到 ffmpeg，无法自动调整封面尺寸")
+	}
+	dir := filepath.Dir(inPath)
+	ext := strings.ToLower(filepath.Ext(inPath))
+	outExt := ext
+	contentType := "image/jpeg"
+	switch ext {
+	case ".jpg", ".jpeg":
+		outExt = ".jpg"
+		contentType = "image/jpeg"
+	case ".png":
+		outExt = ".png"
+		contentType = "image/png"
+	case ".webp":
+		outExt = ".webp"
+		contentType = "image/webp"
+	default:
+		outExt = ".jpg"
+		contentType = "image/jpeg"
+	}
+	outPath := filepath.Join(dir, "cover_1280x720"+outExt)
+	// 保持比例缩放，pad 到 16:9，转为 jpeg
+	// 说明：scale 阶段以较短边为准，pad 居中补边
+	vf := "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)',pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
+	args := []string{
+		"-y", "-i", inPath,
+		"-vf", vf,
+		"-frames:v", "1",
+		outPath,
+	}
+	// 根据输出类型设置质量参数
+	switch outExt {
+	case ".jpg":
+		args = append([]string{"-y", "-i", inPath, "-vf", vf, "-frames:v", "1", "-q:v", "2"}, outPath)[0:]
+	case ".png":
+		args = append([]string{"-y", "-i", inPath, "-vf", vf, "-frames:v", "1"}, outPath)[0:]
+	case ".webp":
+		// 质量参数，若不支持会被 ffmpeg 忽略
+		args = append([]string{"-y", "-i", inPath, "-vf", vf, "-frames:v", "1", "-quality", "85"}, outPath)[0:]
+	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// 若保持原格式失败，回退到 jpg 再试一次
+		if outExt != ".jpg" {
+			outExt = ".jpg"
+			contentType = "image/jpeg"
+			outPath = filepath.Join(dir, "cover_1280x720.jpg")
+			args = []string{"-y", "-i", inPath, "-vf", vf, "-frames:v", "1", "-q:v", "2", outPath}
+			if out2, err2 := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err2 != nil {
+				return "", "", fmt.Errorf("ffmpeg 调整封面失败: %w, output=%s; fallback=%v, out2=%s", err, string(out), err2, string(out2))
+			}
+		} else {
+			return "", "", fmt.Errorf("ffmpeg 调整封面失败: %w, output=%s", err, string(out))
+		}
+	}
+	return outPath, contentType, nil
+}
+
+// extractCoverFromVideo 从视频第一帧生成 1280x720 的封面（带 padding），输出 jpeg
+func extractCoverFromVideo(ctx context.Context, videoPath string) (string, string, error) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", "", fmt.Errorf("未检测到 ffmpeg，无法从视频截取封面")
+	}
+	dir := filepath.Dir(videoPath)
+	outPath := filepath.Join(dir, "cover_from_frame_1280x720.jpg")
+	vf := "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)',pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p"
+	args := []string{
+		"-y",
+		"-ss", "0",
+		"-i", videoPath,
+		"-vf", vf,
+		"-frames:v", "1",
+		"-q:v", "2",
+		outPath,
+	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("ffmpeg 截帧失败: %w, output=%s", err, string(out))
+	}
+	return outPath, "image/jpeg", nil
 }
 
 // publishVideo 发布视频

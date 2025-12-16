@@ -184,14 +184,13 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string) []string {
 	args := []string{
 		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"),
-		"--no-warnings",
 		// 强制 IPv4，规避部分网络环境问题
 		"--force-ipv4",
 	}
 
 	// 恢复之前移除的参数：更接近真实浏览器环境与稳定客户端组合
 	args = append(args,
-		"--extractor-args", "youtube:player_client=web,android",
+		"--extractor-args", "youtube:player_client=android,web",
 		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) Chrome/131.0.0.0 Safari/537.36",
 		"--referer", "https://www.youtube.com/",
 		"--add-header", "Accept-Language:en-US,en;q=0.9",

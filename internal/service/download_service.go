@@ -848,6 +848,35 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			logger.Info().Str("video_path", videoPath).Msg("视频已存在，跳过下载")
 		} else {
 			logger.Warn().Str("video_dir", videoDir).Msg("视频标记为已下载，但未找到视频文件")
+			// 处理异常状态：状态标记为完成但实际文件缺失，触发重新下载
+			logger.Info().Str("video_id", videoID).Msg("检测到视频文件缺失，准备重新下载该视频")
+			// 标记为 downloading，清除失败痕迹，并写入 url
+			if err := s.fileManager.MarkVideoDownloading(videoDir, videoURL); err != nil {
+				logger.Warn().Err(err).Str("video_dir", videoDir).Msg("标记视频下载状态失败")
+			}
+			// 执行下载
+			result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
+			if err != nil {
+				// 下载失败，更新状态为 failed
+				errorMsg := err.Error()
+				if markErr := s.fileManager.MarkVideoFailed(videoDir, errorMsg); markErr != nil {
+					logger.Warn().Err(markErr).Msg("标记下载失败状态失败")
+				}
+				return fmt.Errorf("下载视频失败: %w", err)
+			}
+			videoPath = result.VideoPath
+			// 更新视频目录（使用下载器实际创建的目录）
+			resultDir := filepath.Dir(videoPath)
+			if videoDir != resultDir {
+				videoDir = resultDir
+			}
+			// 标记视频已下载完成并更新 pending
+			if err := s.fileManager.MarkVideoDownloadedWithPath(videoDir, videoPath); err != nil {
+				logger.Warn().Err(err).Msg("标记视频下载状态失败")
+			} else {
+				logger.Info().Str("video_path", videoPath).Msg("视频下载完成（文件缺失后重新下载）")
+				s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, "video", "completed", videoPath)
+			}
 		}
 	}
 
