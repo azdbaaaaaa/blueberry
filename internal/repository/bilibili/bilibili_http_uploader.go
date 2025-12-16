@@ -98,25 +98,36 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 	// 1.1 先上传封面图；封面失败则直接跳过该视频
 	var coverURL string
 	{
-		// 查找封面文件路径（cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）
+		// 查找封面文件路径（优先：与视频同名的 .jpg → cover.{jpg|jpeg|png|webp|gif} → thumbnail.jpg）
 		dir := filepath.Dir(videoPath)
 		coverPath := ""
-		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
-			p := filepath.Join(dir, "cover"+ext)
-			if _, statErr := os.Stat(p); statErr == nil {
-				coverPath = p
-				break
+		// 1) 与视频同名的 jpg（来自 yt-dlp --convert-thumbnails jpg）
+		base := strings.TrimSuffix(actualVideoPath, filepath.Ext(actualVideoPath))
+		candidate := base + ".jpg"
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			coverPath = candidate
+			logger.Debug().Str("path", candidate).Msg("使用与视频同名的 JPG 缩略图作为封面图（优先）")
+		}
+		// 2) cover.{jpg|jpeg|png|webp|gif}
+		if coverPath == "" {
+			for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+				p := filepath.Join(dir, "cover"+ext)
+				if _, statErr := os.Stat(p); statErr == nil {
+					coverPath = p
+					break
+				}
 			}
 		}
+		// 3) thumbnail.jpg
 		if coverPath == "" {
 			thumb := filepath.Join(dir, "thumbnail.jpg")
 			if _, statErr := os.Stat(thumb); statErr == nil {
 				coverPath = thumb
-				logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图")
+				logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图（回退）")
 			}
 		}
 		if coverPath == "" {
-			return nil, fmt.Errorf("未找到封面图文件（需要 cover.{jpg|jpeg|png|webp|gif} 或 thumbnail.jpg）")
+			return nil, fmt.Errorf("未找到封面图文件（需要与视频同名的 .jpg，或 cover.{jpg|jpeg|png|webp|gif}，或 thumbnail.jpg）")
 		}
 		coverURL, err = u.uploadCover(ctx, coverPath, actualVideoPath)
 		if err != nil {

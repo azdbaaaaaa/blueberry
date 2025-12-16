@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -632,7 +633,7 @@ func (s *downloadService) DownloadChannels(ctx context.Context) error {
 
 // DownloadSingleVideo 下载单个YouTube视频及其字幕
 func (s *downloadService) DownloadSingleVideo(ctx context.Context, videoURL string) error {
-	logger.Info().Str("video_url", videoURL).Msg("开始下载视频")
+	logger.Info().Str("video_url", videoURL).Msg("开始统一下载资源（视频/字幕/封面/信息）")
 
 	// 使用全局配置的语言列表
 	languages := s.cfg.Subtitles.Languages
@@ -745,6 +746,36 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		Bool("video_downloaded", videoDownloaded).
 		Msg("检查视频下载状态")
 
+	// 若视频已存在但字幕或封面缺失，也触发统一下载（yt-dlp 会自动跳过已存在资源）
+	if videoDownloaded {
+		subsDownloadedEarly := s.fileManager.IsSubtitlesDownloaded(videoDir, languages)
+		thumbDownloadedEarly := s.fileManager.IsThumbnailDownloaded(videoDir)
+		if !subsDownloadedEarly || !thumbDownloadedEarly {
+			logger.Info().
+				Str("video_id", videoID).
+				Bool("video_downloaded", videoDownloaded).
+				Bool("subtitles_downloaded", subsDownloadedEarly).
+				Bool("thumbnail_downloaded", thumbDownloadedEarly).
+				Msg("检测到资源缺失，触发统一下载（视频/字幕/封面/信息），已存在的将被跳过")
+			// 初始化状态文件（不改变已完成状态）
+			if videoDir != "" {
+				var subtitleURLs map[string]string
+				var thumbnailURL string
+				if videoInfo, err := s.fileManager.LoadVideoInfo(videoDir); err == nil {
+					subtitleURLs = videoInfo.Subtitles
+					if len(videoInfo.Thumbnails) > 0 {
+						thumbnailURL = videoInfo.Thumbnails[0].URL
+					}
+				}
+				_ = s.fileManager.InitializeDownloadStatus(videoDir, videoURL, subtitleURLs, languages, thumbnailURL)
+			}
+			// 统一调用下载器（不强制修改视频状态）
+			if _, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title); err != nil {
+				logger.Warn().Err(err).Msg("统一下载补齐资源失败，后续将按缺失资源继续处理")
+			}
+		}
+	}
+
 	// 如果视频未下载，初始化下载状态并开始下载
 	if !videoDownloaded {
 		// 在下载开始时就创建 download_status.json，包含所有资源的 URL
@@ -812,7 +843,7 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			}
 		}
 
-		logger.Info().Str("video_id", videoID).Msg("开始下载视频")
+		logger.Info().Str("video_id", videoID).Msg("开始统一下载资源（视频/字幕/封面/信息）")
 		// 标记视频为 downloading 状态（重置之前的失败状态）
 		if err := s.fileManager.MarkVideoDownloading(videoDir, videoURL); err != nil {
 			logger.Warn().Err(err).Str("video_dir", videoDir).Msg("标记视频下载状态失败")
@@ -846,7 +877,7 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 		// 视频已下载，查找视频文件路径
 		if videoFile, err := s.fileManager.FindVideoFile(videoDir); err == nil {
 			videoPath = videoFile
-			logger.Info().Str("video_path", videoPath).Msg("视频已存在，跳过下载")
+			logger.Info().Str("video_path", videoPath).Msg("视频已存在，跳过视频下载（仍处理字幕/封面/信息）")
 		} else {
 			logger.Warn().Str("video_dir", videoDir).Msg("视频标记为已下载，但未找到视频文件")
 			// 处理异常状态：状态标记为完成但实际文件缺失，触发重新下载
@@ -919,29 +950,60 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 	subtitlesDownloaded := s.fileManager.IsSubtitlesDownloaded(videoDir, languages)
 	subtitleMap := make(map[string]string) // 用于保存视频信息
 	if !subtitlesDownloaded {
-		logger.Info().Str("video_id", videoID).Strs("languages", languages).Msg("开始下载字幕")
+		logger.Info().Str("video_id", videoID).Strs("languages", languages).Msg("检查并整理字幕（已在统一下载中请求）")
 
-		// 如果视频已下载，需要单独下载字幕
-		if videoDownloaded {
-			// 使用 yt-dlp 单独下载字幕（只下载字幕，不下载视频）
-			// 注意：yt-dlp 的 DownloadVideo 会同时下载视频和字幕，如果视频已存在，我们需要单独处理字幕
-			// 这里我们重新调用 DownloadVideo，但 yt-dlp 会跳过已存在的视频文件
-			result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
-			if err != nil {
-				logger.Warn().Err(err).Msg("下载字幕失败，继续处理其他任务")
-				// 标记所有字幕为失败状态
-				for _, lang := range languages {
-					if err := s.fileManager.MarkSubtitleFailed(videoDir, lang, fmt.Sprintf("下载字幕失败: %v", err)); err != nil {
-						logger.Warn().Str("lang", lang).Err(err).Msg("标记字幕失败状态失败")
+		// 优先使用本地已下载的字幕文件，避免再次请求网络
+		if existingSubs, err := s.fileManager.FindSubtitleFiles(videoDir); err == nil && len(existingSubs) > 0 {
+			downloadedLanguages := make([]string, 0)
+			subtitlePaths := make(map[string]string)
+			seenLanguages := make(map[string]bool)
+
+			for _, lang := range languages {
+				// 期望名：{video_id}_{lang}.srt
+				expectedName := fmt.Sprintf("%s_%s.srt", videoID, lang)
+				expectedPath := filepath.Join(videoDir, expectedName)
+				foundPath := ""
+				if _, err := os.Stat(expectedPath); err == nil {
+					foundPath = expectedPath
+				} else {
+					// 兼容旧格式：包含 .{lang}. 或 -{lang}. 或 _{lang}.
+					for _, subPath := range existingSubs {
+						base := filepath.Base(subPath)
+						if strings.Contains(base, ".frame.srt") {
+							continue
+						}
+						if strings.Contains(base, "."+lang+".") ||
+							strings.Contains(base, "-"+lang+".") ||
+							strings.Contains(base, "_"+lang+".") {
+							foundPath = subPath
+							break
+						}
 					}
-					// 同时更新 pending_downloads.json
-					s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "failed", "")
 				}
-			} else {
-				logger.Info().Int("subtitle_count", len(result.SubtitlePaths)).Msg("字幕下载完成")
+				if foundPath != "" {
+					downloadedLanguages = append(downloadedLanguages, lang)
+					subtitlePaths[lang] = foundPath
+					seenLanguages[lang] = true
+				}
+			}
+
+			if len(downloadedLanguages) > 0 {
+				if err := s.fileManager.MarkSubtitlesDownloadedWithPaths(videoDir, downloadedLanguages, subtitlePaths, subtitleMap); err != nil {
+					logger.Warn().Err(err).Msg("标记字幕下载状态失败（本地）")
+				} else {
+					logger.Info().Strs("languages", downloadedLanguages).Msg("已从本地文件整理字幕并保存状态")
+					for _, lang := range downloadedLanguages {
+						subPath := subtitlePaths[lang]
+						s.fileManager.UpdatePendingDownloadStatus(channelID, videoID, lang, "completed", subPath)
+					}
+				}
+			}
+
+			// 若所有请求语言都找到，本地即可满足，跳过网络查询
+			if len(downloadedLanguages) == len(languages) {
+				goto SUBTITLES_DONE
 			}
 		}
-		// 如果视频刚下载，字幕应该已经在下载结果中
 
 		// 获取字幕信息并更新状态
 		subtitleInfo, err := s.subtitleManager.ListSubtitles(ctx, videoURL, languages)
@@ -1058,14 +1120,10 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 	} else {
 		logger.Info().Str("video_id", videoID).Msg("字幕已下载，跳过")
 		// 即使字幕已下载，也需要获取字幕信息用于保存 video_info.json
-		subtitleInfo, err := s.subtitleManager.ListSubtitles(ctx, videoURL, languages)
-		if err == nil && subtitleInfo != nil {
-			for _, sub := range subtitleInfo.SubtitleURLs {
-				subtitleMap[sub.Language] = sub.URL
-			}
-		}
+		// 这里不强制网络请求，保留空的 subtitleMap（或后续载入 video_info.json 时补全）
 	}
 
+SUBTITLES_DONE:
 	// ========== 步骤 3: 下载缩略图并设置为封面图 ==========
 	thumbnailDownloaded := s.fileManager.IsThumbnailDownloaded(videoDir)
 	thumbnails := s.buildThumbnailsFromRawData(rawData) // 用于保存视频信息
@@ -1073,7 +1131,7 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 	hasCover := false
 
 	if !thumbnailDownloaded {
-		logger.Info().Str("video_id", videoID).Msg("开始下载缩略图")
+		logger.Info().Str("video_id", videoID).Msg("检查封面图（已在统一下载中请求）")
 
 		thumbnailURL := ""
 		if len(thumbnails) > 0 {
@@ -1216,15 +1274,91 @@ func (s *downloadService) buildThumbnailsFromRawData(rawData map[string]interfac
 	return thumbnails
 }
 
+// findPreferredYouTubeThumbnail 基于视频目录中的视频ID，探测 YouTube 的高清缩略图端点
+// 优先顺序：maxresdefault.jpg → hq720.jpg → sddefault.jpg → hqdefault.jpg
+// 返回第一个可访问的候选项
+func (s *downloadService) findPreferredYouTubeThumbnail(ctx context.Context, videoDir string) (file.Thumbnail, bool) {
+	videoID := filepath.Base(videoDir)
+	if videoID == "" {
+		return file.Thumbnail{}, false
+	}
+	base := "https://i.ytimg.com/vi/" + videoID + "/"
+	candidates := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"maxresdefault.jpg", 1280, 720},
+		{"hq720.jpg", 1280, 720},
+		{"sddefault.jpg", 640, 480},
+		{"hqdefault.jpg", 480, 360},
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, c := range candidates {
+		url := base + c.name
+		if s.urlExists(ctx, client, url) {
+			return file.Thumbnail{
+				URL:    url,
+				Width:  c.width,
+				Height: c.height,
+			}, true
+		}
+	}
+	return file.Thumbnail{}, false
+}
+
+// urlExists 使用 HEAD 请求检测资源是否存在；如被禁止则回退到 GET Range 0-0
+func (s *downloadService) urlExists(ctx context.Context, client *http.Client, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err == nil {
+		if resp, err := client.Do(req); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return true
+			}
+		}
+	}
+	req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
+}
+
 // downloadThumbnails 下载视频缩略图，保存为 cover.{ext} 格式
 func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir string, rawData map[string]interface{}) (string, error) {
 	if rawData == nil {
 		return "", nil
 	}
 
+	// 优先使用 yt-dlp 已下载并转换为 jpg 的缩略图（与视频同名，仅扩展名为 .jpg）
+	if videoPath, err := s.fileManager.FindVideoFile(videoDir); err == nil && videoPath != "" {
+		base := strings.TrimSuffix(videoPath, filepath.Ext(videoPath))
+		jpgPath := base + ".jpg"
+		if _, err := os.Stat(jpgPath); err == nil {
+			logger.Info().Str("thumbnail_path", jpgPath).Msg("检测到 yt-dlp 已下载的 JPG 缩略图，直接使用")
+			if err := s.fileManager.MarkThumbnailDownloadedWithPath(videoDir, jpgPath, ""); err != nil {
+				logger.Warn().Err(err).Msg("标记缩略图下载状态失败")
+			}
+			return jpgPath, nil
+		}
+	}
+
 	thumbnails := s.buildThumbnailsFromRawData(rawData)
 	if len(thumbnails) == 0 {
 		return "", nil
+	}
+
+	// 先尝试根据视频ID探测高分辨率端点，并将其作为高优先级候选
+	if t, ok := s.findPreferredYouTubeThumbnail(ctx, videoDir); ok {
+		// 放到最前，后续选择逻辑会优先命中
+		thumbnails = append([]file.Thumbnail{t}, thumbnails...)
 	}
 
 	// 选择高清缩略图：优先以下分辨率（从高到低），否则选择面积最大的

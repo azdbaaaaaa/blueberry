@@ -218,6 +218,12 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
 		// 强制 IPv4，规避部分网络环境问题
 		"--force-ipv4",
+		// 统一拉取相关资源
+		"--write-thumbnail",
+		"--convert-thumbnails", "jpg",
+		"--embed-thumbnail",
+		"--write-info-json",
+		"--write-description",
 	}
 
 	// 根据 client 选择合适的 UA/Headers
@@ -330,8 +336,6 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 	args = append(args, "--sleep-requests", "3")
 	// --sleep-interval: 在下载间隔之间延迟（秒），模拟真实用户行为
 	args = append(args, "--sleep-interval", "2")
-	// --sleep-subtitles: 在下载字幕之间延迟（秒），避免字幕请求过于频繁
-	args = append(args, "--sleep-subtitles", "1")
 	// --concurrent-fragments: 控制并发
 	args = append(args, "--concurrent-fragments", "1")
 
@@ -410,6 +414,12 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 		// 与正式策略保持一致的文件名模板，包含分辨率高度
 		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
 		"--force-ipv4",
+		// 统一拉取相关资源（最小化仍获取必要附属资源）
+		"--write-thumbnail",
+		"--convert-thumbnails", "jpg",
+		"--embed-thumbnail",
+		"--write-info-json",
+		"--write-description",
 	}
 	// if _, err := exec.LookPath("node"); err == nil {
 	// 	args = append(args, "--js-runtimes", "node")
@@ -437,7 +447,7 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 	if minHeight <= 0 {
 		minHeight = 1080
 	}
-	args = append(args, "-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight))
+	args = append(args, "-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight), "--merge-output-format", "mp4")
 	args = append(args, videoURL)
 	return args
 }
