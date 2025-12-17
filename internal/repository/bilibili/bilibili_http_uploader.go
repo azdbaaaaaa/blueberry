@@ -587,54 +587,64 @@ func (u *httpUploader) uploadVideo(ctx context.Context, videoPath string) (strin
 			logger.Warn().Int("chunk", partNumber).Msg("分块上传时未设置 X-Upos-Auth header")
 		}
 
-		// 添加重试机制（最多重试3次）
+		// 添加重试机制（网络错误与非200/非204响应均重试）
 		var resp *http.Response
 		maxRetries := 3
-		for retry := 0; retry < maxRetries; retry++ {
+		backoffBase := 1
+		if cfg := config.Get(); cfg != nil {
+			if cfg.Bilibili.ChunkUploadRetries > 0 {
+				maxRetries = cfg.Bilibili.ChunkUploadRetries
+			}
+			if cfg.Bilibili.ChunkRetryBackoffSeconds > 0 {
+				backoffBase = cfg.Bilibili.ChunkRetryBackoffSeconds
+			}
+		}
+		var lastErr error
+		for attempt := 1; attempt <= maxRetries; attempt++ {
 			resp, err = u.httpClient.Do(req)
-			if err == nil {
+			if err == nil && resp != nil && (resp.StatusCode == 200 || resp.StatusCode == 204) {
+				resp.Body.Close()
+				lastErr = nil
 				break
 			}
-
-			if retry < maxRetries-1 {
-				waitTime := time.Duration(retry+1) * time.Second
+			// 生成错误信息
+			var statusCode int
+			var bodyPreview string
+			if resp != nil {
+				statusCode = resp.StatusCode
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				bodyPreview = string(bodyBytes)
+			}
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = fmt.Errorf("HTTP %d, 响应: %s", statusCode, bodyPreview)
+			}
+			// 重试或失败退出
+			if attempt < maxRetries {
+				waitTime := time.Duration(attempt*backoffBase) * time.Second
 				logger.Warn().
 					Int("chunk", partNumber).
-					Int("retry", retry+1).
+					Int("attempt", attempt).
+					Int("max", maxRetries).
 					Dur("wait", waitTime).
-					Err(err).
-					Msg("分块上传失败，重试中")
+					Err(lastErr).
+					Msg("分块上传失败，准备重试")
 				time.Sleep(waitTime)
-
 				// 重新创建请求（因为 body 已经被读取）
 				req, _ = http.NewRequestWithContext(ctx, "PUT", chunkURL, bytes.NewReader(chunkData))
 				u.setHeaders(req)
 				req.Header.Set("Content-Type", "application/octet-stream")
 				req.Header.Set("Content-Length", fmt.Sprintf("%d", len(chunkData)))
-				// 重新设置 X-Upos-Auth
 				if uposAuth != "" {
 					req.Header.Set("X-Upos-Auth", uposAuth)
 				}
+				continue
 			}
+			// 已用尽重试
+			return "", fmt.Errorf("上传分块 %d 失败（已重试 %d 次）: %w", partNumber, maxRetries, lastErr)
 		}
-
-		if err != nil {
-			return "", fmt.Errorf("上传分块 %d 失败（已重试 %d 次）: %w", partNumber, maxRetries, err)
-		}
-
-		// 检查响应状态码
-		if resp.StatusCode != 200 && resp.StatusCode != 204 {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			logger.Error().
-				Int("chunk", partNumber).
-				Int("status_code", resp.StatusCode).
-				Str("response", string(bodyBytes)).
-				Msg("分块上传返回非200状态码")
-			return "", fmt.Errorf("上传分块 %d 失败: HTTP %d, 响应: %s", partNumber, resp.StatusCode, string(bodyBytes))
-		}
-
-		resp.Body.Close()
 
 		logger.Info().
 			Int("chunk", partNumber).

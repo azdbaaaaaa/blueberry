@@ -29,6 +29,10 @@ type BilibiliConfig struct {
 	DeleteOriginalAfterUpload bool `mapstructure:"delete_original_after_upload"`
 	// 每个账号每日最大上传数，用于随机轮转账号时的限流，默认 160
 	DailyUploadLimit int `mapstructure:"daily_upload_limit"`
+	// 分块上传重试次数（单个分块），默认 3
+	ChunkUploadRetries int `mapstructure:"chunk_upload_retries"`
+	// 分块上传重试退避（秒），第 n 次重试等待 n*该值 秒，默认 1
+	ChunkRetryBackoffSeconds int `mapstructure:"chunk_retry_backoff_seconds"`
 }
 
 type YouTubeChannel struct {
@@ -123,6 +127,8 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("channel.generate_pending_downloads", false)
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
 	viper.SetDefault("bilibili.upload_subtitles", false)
+	viper.SetDefault("bilibili.chunk_upload_retries", 3)
+	viper.SetDefault("bilibili.chunk_retry_backoff_seconds", 1)
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
 	viper.SetDefault("youtube.force_download_undownloadable", false)
 	viper.SetDefault("youtube.min_height", 1080)
