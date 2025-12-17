@@ -748,15 +748,17 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 
 	// 若视频已存在但字幕或封面缺失，也触发统一下载（yt-dlp 会自动跳过已存在资源）
 	if videoDownloaded {
-		subsDownloadedEarly := s.fileManager.IsSubtitlesDownloaded(videoDir, languages)
+		// 仅检查英文字幕是否存在，避免因其他语言缺失而反复触发统一下载
+		checkLangs := []string{"en"}
+		subsDownloadedEarly := s.fileManager.IsSubtitlesDownloaded(videoDir, checkLangs)
 		thumbDownloadedEarly := s.fileManager.IsThumbnailDownloaded(videoDir)
 		if !subsDownloadedEarly || !thumbDownloadedEarly {
 			logger.Info().
 				Str("video_id", videoID).
 				Bool("video_downloaded", videoDownloaded).
-				Bool("subtitles_downloaded", subsDownloadedEarly).
+				Bool("subtitles_downloaded_en", subsDownloadedEarly).
 				Bool("thumbnail_downloaded", thumbDownloadedEarly).
-				Msg("检测到资源缺失，触发统一下载（视频/字幕/封面/信息），已存在的将被跳过")
+				Msg("检测到资源缺失（仅检查英文字幕），触发统一下载（视频/字幕/封面/信息），已存在的将被跳过")
 			// 初始化状态文件（不改变已完成状态）
 			if videoDir != "" {
 				var subtitleURLs map[string]string

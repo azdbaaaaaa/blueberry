@@ -70,10 +70,10 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		useBest       bool
 	}
 	tries := []tryConf{
-		// 预先最小化尝试（不加 cookies/UA/headers），使用 best 格式以减少风控触发，同时拿到最高分辨率
-		{client: "web", includeCookie: false, sleepBefore: 0, minimal: true, useBest: true},
-		{client: "web", includeCookie: false, sleepBefore: 0, useBest: true},
-		{client: "web", includeCookie: true, sleepBefore: 3 * time.Second, useBest: true},
+		// 优先使用 cookies（更稳定，减少风控），统一使用 best 选择器
+		{client: "web", includeCookie: true, sleepBefore: 0, useBest: true},
+		// 然后再尝试无 cookies
+		{client: "web", includeCookie: false, sleepBefore: 3 * time.Second, useBest: true},
 	}
 	// 按配置决定是否添加 android 回退
 	if cfg := config.Get(); cfg == nil || !cfg.YouTube.DisableAndroidFallback {
@@ -229,37 +229,7 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		"--write-description",
 	}
 
-	// 根据 client 选择合适的 UA/Headers（不再设置 --extractor-args，使用默认 client）
-	uaWeb := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	// 常见 Android YouTube UA 格式；不需要完全精准，避免过于老旧
-	uaAndroid := "com.google.android.youtube/19.39.37 (Linux; U; Android 11) gzip"
-	switch strings.ToLower(playerClient) {
-	case "web":
-		args = append(args,
-			"--user-agent", uaWeb,
-			"--referer", "https://www.youtube.com/",
-			"--add-header", "Accept-Language:en-US,en;q=0.9",
-			"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-			"--add-header", "Accept-Encoding:gzip, deflate, br",
-			"--add-header", "DNT:1",
-			"--add-header", "Connection:keep-alive",
-			"--add-header", "Upgrade-Insecure-Requests:1",
-		)
-	case "android":
-		args = append(args,
-			"--user-agent", uaAndroid,
-			"--referer", "https://www.youtube.com/",
-			"--add-header", "Accept: */*",
-			"--add-header", "Accept-Language: en-US",
-			"--add-header", "Connection: keep-alive",
-		)
-	default:
-		// 兜底按 web 处理
-		args = append(args,
-			"--user-agent", uaWeb,
-			"--referer", "https://www.youtube.com/",
-		)
-	}
+	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// 如存在 Node，声明 JS runtime，提升兼容性
 	// if _, err := exec.LookPath("node"); err == nil {
 	// 	args = append(args, "--js-runtimes", "node")
@@ -331,7 +301,7 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 		minHeight = cfg.YouTube.MinHeight
 	}
 	format := fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight)
-	args = append(args, "-f", format, "--merge-output-format", "mp4")
+	args = append(args, "-f", format) // , "--merge-output-format", "mp4"
 
 	// 添加请求延迟参数，降低被反爬虫检测的风险
 	// --sleep-requests: 在请求之间延迟（秒），避免请求过于频繁
@@ -493,8 +463,6 @@ func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string
 		"--embed-thumbnail",
 		"--write-info-json",
 		"--write-description",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		"--referer", "https://www.youtube.com/",
 	}
 	// 字幕
 	args = append(args, "--write-sub", "--write-auto-sub", "--convert-subs", "srt")
@@ -504,9 +472,9 @@ func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string
 		args = append(args, "--sub-langs", "all")
 	}
 	// 重试与片段参数
-	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments")
-	// best 格式，不严格限定高度
-	args = append(args, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4")
+	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments", "--concurrent-fragments", "4")
+	// 指定格式与容器
+	args = append(args, "-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4")
 	args = append(args, videoURL)
 	return args
 }
@@ -522,31 +490,7 @@ func (d *downloader) buildBestArgsWithClient(videoDir, videoURL string, language
 		"--write-info-json",
 		"--write-description",
 	}
-	uaWeb := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	uaAndroid := "com.google.android.youtube/19.39.37 (Linux; U; Android 11) gzip"
-	switch strings.ToLower(playerClient) {
-	case "web":
-		args = append(args,
-			"--user-agent", uaWeb,
-			"--referer", "https://www.youtube.com/",
-			"--add-header", "Accept-Language:en-US,en;q=0.9",
-			"--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-			"--add-header", "Accept-Encoding:gzip, deflate, br",
-			"--add-header", "DNT:1",
-			"--add-header", "Connection:keep-alive",
-			"--add-header", "Upgrade-Insecure-Requests:1",
-		)
-	case "android":
-		args = append(args,
-			"--user-agent", uaAndroid,
-			"--referer", "https://www.youtube.com/",
-			"--add-header", "Accept: */*",
-			"--add-header", "Accept-Language: en-US",
-			"--add-header", "Connection: keep-alive",
-		)
-	default:
-		args = append(args, "--user-agent", uaWeb, "--referer", "https://www.youtube.com/")
-	}
+	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// cookies
 	if includeCookies {
 		if d.cookiesFile != "" {
@@ -569,9 +513,9 @@ func (d *downloader) buildBestArgsWithClient(videoDir, videoURL string, language
 		args = append(args, "--sub-langs", "all")
 	}
 	// 重试与片段参数
-	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments")
-	// best 格式
-	args = append(args, "-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4")
+	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments", "--concurrent-fragments", "4")
+	// 指定格式与容器
+	args = append(args, "-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4")
 	args = append(args, videoURL)
 	return args
 }

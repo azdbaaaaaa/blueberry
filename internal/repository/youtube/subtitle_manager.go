@@ -16,6 +16,8 @@ import (
 type SubtitleManager interface {
 	ListSubtitles(ctx context.Context, videoURL string, languages []string) (*VideoSubtitleInfo, error)
 	RenameSubtitlesForAID(subtitlePaths []string, aid string, outputDir string) ([]string, error)
+	// CopySubtitlesForAID 将传入的字幕文件复制到 {destRoot}/{aid}/ 下，文件名规则：{aid}_{lang}{ext}
+	CopySubtitlesForAID(subtitlePaths []string, aid string, destRoot string) ([]string, error)
 }
 
 type SubtitleInfo struct {
@@ -193,6 +195,52 @@ func (s *subtitleManager) RenameSubtitlesForAID(subtitlePaths []string, aid stri
 	}
 
 	return renamedPaths, nil
+}
+
+// CopySubtitlesForAID 将字幕文件复制到 {destRoot}/{aid}/ 下，文件名：{aid}_{lang}{ext}
+func (s *subtitleManager) CopySubtitlesForAID(subtitlePaths []string, aid string, destRoot string) ([]string, error) {
+	if aid == "" {
+		return subtitlePaths, fmt.Errorf("aid不能为空")
+	}
+	if destRoot == "" {
+		destRoot = "./output"
+	}
+	destDir := filepath.Join(destRoot, aid)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return nil, fmt.Errorf("创建字幕归档目录失败: %w", err)
+	}
+
+	copiedPaths := make([]string, 0, len(subtitlePaths))
+	for _, subtitlePath := range subtitlePaths {
+		originalPath := subtitlePath
+		if strings.Contains(filepath.Base(subtitlePath), ".frame.srt") {
+			orig := strings.Replace(subtitlePath, ".frame.srt", ".srt", 1)
+			if _, err := os.Stat(orig); err == nil {
+				originalPath = orig
+			}
+		}
+
+		lang := s.extractLanguageFromSubtitleFile(originalPath)
+		if lang == "" {
+			lang = "unknown"
+		}
+		ext := filepath.Ext(originalPath)
+		newName := fmt.Sprintf("%s_%s%s", aid, lang, ext)
+		dst := filepath.Join(destDir, newName)
+
+		if err := s.copyFile(originalPath, dst); err != nil {
+			return nil, fmt.Errorf("复制字幕到归档目录失败: %w", err)
+		}
+		copiedPaths = append(copiedPaths, dst)
+		logger.Info().
+			Str("original", originalPath).
+			Str("archived_to", dst).
+			Str("aid", aid).
+			Str("lang", lang).
+			Msg("字幕已复制到归档目录")
+	}
+
+	return copiedPaths, nil
 }
 
 func (s *subtitleManager) extractLanguageFromSubtitleFile(filePath string) string {

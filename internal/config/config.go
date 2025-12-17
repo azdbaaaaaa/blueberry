@@ -23,6 +23,8 @@ type BilibiliConfig struct {
 	CookiesFromBrowser string `mapstructure:"cookies_from_browser"` // 从浏览器导入 cookies（仅本地开发环境使用）
 	CookiesFile        string `mapstructure:"cookies_file"`         // Cookies 文件路径（Netscape 格式或 JSON 格式，推荐用于服务器环境）
 	UploadMethod       string `mapstructure:"upload_method"`        // 上传方式：http（纯HTTP，推荐）或 chromedp（浏览器自动化，需要浏览器）
+	// UploadSubtitles 控制是否上传字幕文件，默认 false（不上传）
+	UploadSubtitles bool `mapstructure:"upload_subtitles"`
 	// 上传成功后是否删除本地原视频文件（仅删除视频，不删除字幕/元数据）
 	DeleteOriginalAfterUpload bool `mapstructure:"delete_original_after_upload"`
 	// 每个账号每日最大上传数，用于随机轮转账号时的限流，默认 160
@@ -49,6 +51,8 @@ type SubtitlesConfig struct {
 
 type OutputConfig struct {
 	Directory string `mapstructure:"directory"`
+	// SubtitleArchive 字幕归档根目录（上传完成后将字幕复制到 {SubtitleArchive}/{aid}/ 下）
+	SubtitleArchive string `mapstructure:"subtitle_archive"`
 }
 
 type YouTubeConfig struct {
@@ -106,10 +110,12 @@ func Load(configPath string) (*Config, error) {
 	// 默认值
 	viper.SetDefault("channel.generate_pending_downloads", false)
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
+	viper.SetDefault("bilibili.upload_subtitles", false)
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
 	viper.SetDefault("youtube.force_download_undownloadable", false)
 	viper.SetDefault("youtube.min_height", 1080)
 	viper.SetDefault("youtube.disable_android_fallback", true)
+	viper.SetDefault("output.subtitle_archive", "./output")
 
 	if configPath != "" {
 		viper.SetConfigFile(configPath)

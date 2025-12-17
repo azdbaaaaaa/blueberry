@@ -147,15 +147,19 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		// 如果没有英文字幕，使用所有字幕
 		subtitlePaths = allSubtitlePaths
 	}
+	if !s.cfg.Bilibili.UploadSubtitles {
+		subtitlePaths = []string{}
+		logger.Info().Msg("已禁用字幕上传（bilibili.upload_subtitles=false）")
+	}
 	logger.Info().
 		Int("total_subtitles", len(allSubtitlePaths)).
 		Int("selected_subtitles", len(subtitlePaths)).
 		Msg("字幕文件选择完成")
-	// 优先用 video_info.json 的 Title，缺省回退文件名
+	// 使用 video_id 作为标题；若无法获取则回退到文件名
 	videoTitle := ""
 	if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
-		if t := strings.TrimSpace(info.Title); t != "" {
-			videoTitle = t
+		if id := strings.TrimSpace(info.ID); id != "" {
+			videoTitle = id
 		}
 	}
 	if videoTitle == "" {
@@ -218,6 +222,14 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 				logger.Warn().Err(err).Msg("重命名字幕文件失败")
 			} else {
 				logger.Info().Int("count", len(renamedPaths)).Msg("字幕文件已重命名")
+			}
+		}
+		// 归档所有字幕文件（无论是否上传字幕），复制到 {subtitle_archive}/{aid}/
+		if len(allSubtitlePaths) > 0 {
+			if archived, err := s.subtitleManager.CopySubtitlesForAID(allSubtitlePaths, result.VideoID, s.cfg.Output.SubtitleArchive); err != nil {
+				logger.Warn().Err(err).Str("aid", result.VideoID).Msg("复制字幕到归档目录失败")
+			} else {
+				logger.Info().Int("count", len(archived)).Str("aid", result.VideoID).Str("archive_root", s.cfg.Output.SubtitleArchive).Msg("字幕已复制到归档目录")
 			}
 		}
 	} else {
@@ -330,16 +342,17 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			// 如果没有英文字幕，使用所有字幕
 			subtitlePaths = allSubtitlePaths
 		}
+		if !s.cfg.Bilibili.UploadSubtitles {
+			subtitlePaths = []string{}
+			logger.Info().Msg("已禁用字幕上传（bilibili.upload_subtitles=false）")
+		}
 		logger.Info().
 			Int("total_subtitles", len(allSubtitlePaths)).
 			Int("selected_subtitles", len(subtitlePaths)).
 			Msg("字幕文件选择完成")
 
-		// 使用 title 或从文件提取
-		videoTitle := title
-		if videoTitle == "" {
-			videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
-		}
+		// 使用 video_id 作为标题
+		videoTitle := videoID
 
 		// 检查封面图是否存在（必需，上传器缺失时会直接退出）
 		coverPath, _ := s.fileManager.FindCoverFile(videoDir)
@@ -410,6 +423,14 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 					logger.Warn().Err(err).Msg("重命名字幕文件失败")
 				} else {
 					logger.Info().Int("count", len(renamedPaths)).Msg("字幕文件已重命名")
+				}
+			}
+			// 归档所有字幕
+			if len(allSubtitlePaths) > 0 {
+				if archived, err := s.subtitleManager.CopySubtitlesForAID(allSubtitlePaths, result.VideoID, s.cfg.Output.SubtitleArchive); err != nil {
+					logger.Warn().Err(err).Str("aid", result.VideoID).Msg("复制字幕到归档目录失败")
+				} else {
+					logger.Info().Int("count", len(archived)).Str("aid", result.VideoID).Str("archive_root", s.cfg.Output.SubtitleArchive).Msg("字幕已复制到归档目录")
 				}
 			}
 		} else {
@@ -508,11 +529,13 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 		if len(subtitlePaths) == 0 {
 			subtitlePaths = allSubtitlePaths
 		}
-
-		videoTitle := title
-		if videoTitle == "" {
-			videoTitle = s.fileManager.ExtractVideoTitleFromFile(videoFile)
+		if !s.cfg.Bilibili.UploadSubtitles {
+			subtitlePaths = []string{}
+			logger.Info().Msg("已禁用字幕上传（bilibili.upload_subtitles=false）")
 		}
+
+		// 使用 video_id 作为标题
+		videoTitle := videoID
 
 		logger.Info().
 			Str("video_file", videoFile).
@@ -555,6 +578,14 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			if len(subtitlePaths) > 0 {
 				if renamed, err := s.RenameSubtitlesForAID(subtitlePaths, result.VideoID); err == nil {
 					logger.Info().Int("count", len(renamed)).Msg("字幕文件已重命名")
+				}
+			}
+			// 归档所有字幕
+			if len(allSubtitlePaths) > 0 {
+				if archived, err := s.subtitleManager.CopySubtitlesForAID(allSubtitlePaths, result.VideoID, s.cfg.Output.SubtitleArchive); err != nil {
+					logger.Warn().Err(err).Str("aid", result.VideoID).Msg("复制字幕到归档目录失败")
+				} else {
+					logger.Info().Int("count", len(archived)).Str("aid", result.VideoID).Str("archive_root", s.cfg.Output.SubtitleArchive).Msg("字幕已复制到归档目录")
 				}
 			}
 		} else {
