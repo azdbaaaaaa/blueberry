@@ -216,18 +216,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 }
 
 func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
-	args := []string{
-		// 文件名包含分辨率高度，便于后续识别（如 1080p/720p）
-		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		// 强制 IPv4，规避部分网络环境问题
-		"--force-ipv4",
-		// 统一拉取相关资源
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--embed-thumbnail",
-		"--write-info-json",
-		"--write-description",
-	}
+	args := []string{}
+	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
 
 	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// 如存在 Node，声明 JS runtime，提升兼容性
@@ -237,79 +227,39 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 
 	// 添加 cookies（按策略控制）
 	if includeCookies {
-		if d.cookiesFile != "" {
-			cookiesPath := d.cookiesFile
-			if !filepath.IsAbs(cookiesPath) {
-				if absPath, err := filepath.Abs(cookiesPath); err == nil {
-					cookiesPath = absPath
-					logger.Info().Str("original", d.cookiesFile).Str("resolved", cookiesPath).Msg("解析 cookies 文件路径")
-				} else {
-					logger.Error().Str("path", d.cookiesFile).Err(err).Msg("无法解析 cookies 文件路径，使用原始路径")
-				}
+		cookiesPath := d.cookiesFile
+		if cookiesPath != "" && !filepath.IsAbs(cookiesPath) {
+			if absPath, err := filepath.Abs(cookiesPath); err == nil {
+				cookiesPath = absPath
+				logger.Info().Str("original", d.cookiesFile).Str("resolved", cookiesPath).Msg("解析 cookies 文件路径")
+			} else {
+				logger.Error().Str("path", d.cookiesFile).Err(err).Msg("无法解析 cookies 文件路径，使用原始路径")
 			}
+		}
+		if cookiesPath != "" {
 			if fileInfo, err := os.Stat(cookiesPath); err != nil {
 				logger.Error().Str("path", cookiesPath).Err(err).Msg("cookies 文件不存在或无法访问，下载可能失败")
 			} else {
 				logger.Info().Str("path", cookiesPath).Int64("size", fileInfo.Size()).Msg("cookies 文件存在")
 			}
-			args = append(args, "--cookies", cookiesPath)
-		} else if d.cookiesFromBrowser != "" {
-			logger.Info().Str("browser", d.cookiesFromBrowser).Msg("使用浏览器 cookies")
-			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
-		} else {
-			logger.Warn().Msg("未配置 cookies，某些视频可能无法下载")
 		}
+		args = append(args, BuildYtDlpCookiesArgs(true, cookiesPath, d.cookiesFromBrowser)...)
 	}
 
-	// yt-dlp 支持通过 --sub-langs 指定多个语言（逗号分隔）
-	// 也支持 --write-sub 和 --write-auto-sub 来下载手动和自动生成的字幕
-	// 添加 --sleep-subtitles 参数，在下载字幕之间添加延迟，避免 429 错误
-	if len(languages) > 0 {
-		args = append(args, "--write-sub", "--write-auto-sub")
-		// 使用 --sub-langs 参数，多个语言用逗号分隔
-		subLangs := strings.Join(languages, ",")
-		args = append(args, "--sub-langs", subLangs)
-		// 在下载字幕之间添加 2 秒延迟，避免触发 429 错误
-		args = append(args, "--sleep-subtitles", "2")
-	} else {
-		// 如果 languages 为空，下载所有可用字幕
-		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all")
-		// 在下载字幕之间添加 2 秒延迟，避免触发 429 错误
-		args = append(args, "--sleep-subtitles", "2")
-	}
-
-	// 将字幕转换为 SRT 格式（更通用，兼容性更好）
-	// YouTube 默认提供 VTT 格式，但 SRT 格式更广泛支持
-	// 注意：转换需要 ffmpeg，如果系统没有安装 ffmpeg，则不转换，直接使用 VTT 格式
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		args = append(args, "--convert-subs", "srt")
-		logger.Debug().Msg("检测到 ffmpeg，将字幕转换为 SRT 格式")
-	} else {
-		logger.Warn().Msg("未检测到 ffmpeg，将使用 VTT 格式字幕（无需转换）")
-	}
+	// 字幕参数统一管理
+	args = append(args, BuildYtDlpSubtitleArgs(languages)...)
 
 	// 添加重试和错误处理参数，提高下载成功率
-	args = append(args,
-		"--retries", "3", // 重试 3 次
-		"--fragment-retries", "3", // 片段重试 3 次
-		"--skip-unavailable-fragments", // 跳过不可用的片段
-	)
+	args = append(args, BuildYtDlpStabilityArgs(config.Get())...)
 
 	// 严格最低分辨率（从配置读取），达不到则失败
 	minHeight := 1080
 	if cfg := config.Get(); cfg != nil && cfg.YouTube.MinHeight > 0 {
 		minHeight = cfg.YouTube.MinHeight
 	}
-	format := fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight)
-	args = append(args, "-f", format) // , "--merge-output-format", "mp4"
+	args = append(args, BuildYtDlpFormatArgsMinHeight(minHeight)...)
 
-	// 添加请求延迟参数，降低被反爬虫检测的风险
-	// --sleep-requests: 在请求之间延迟（秒），避免请求过于频繁
-	args = append(args, "--sleep-requests", "3")
-	// --sleep-interval: 在下载间隔之间延迟（秒），模拟真实用户行为
-	args = append(args, "--sleep-interval", "2")
-	// --concurrent-fragments: 控制并发
-	args = append(args, "--concurrent-fragments", "1")
+	// 稳定性参数在 BuildYtDlpStabilityArgs 中统一管理
 
 	args = append(args, videoURL)
 
@@ -411,111 +361,58 @@ func (d *downloader) markHas1080p(videoDir string, videoPath string) error {
 
 // buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）
 func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string, minHeight int, includeCookies bool) []string {
-	args := []string{
-		// 与正式策略保持一致的文件名模板，包含分辨率高度
-		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		"--force-ipv4",
-		// 统一拉取相关资源（最小化仍获取必要附属资源）
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--embed-thumbnail",
-		"--write-info-json",
-		"--write-description",
-	}
-	// if _, err := exec.LookPath("node"); err == nil {
-	// 	args = append(args, "--js-runtimes", "node")
-	// }
+	args := []string{}
+	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
 	if includeCookies {
-		if d.cookiesFile != "" {
-			cookiesPath := d.cookiesFile
-			if !filepath.IsAbs(cookiesPath) {
-				if absPath, err := filepath.Abs(cookiesPath); err == nil {
-					cookiesPath = absPath
-				}
+		cookiesPath := d.cookiesFile
+		if cookiesPath != "" && !filepath.IsAbs(cookiesPath) {
+			if absPath, err := filepath.Abs(cookiesPath); err == nil {
+				cookiesPath = absPath
 			}
-			args = append(args, "--cookies", cookiesPath)
-		} else if d.cookiesFromBrowser != "" {
-			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
 		}
+		args = append(args, BuildYtDlpCookiesArgs(true, cookiesPath, d.cookiesFromBrowser)...)
 	}
-	// 字幕参数尽量保持，但不加额外延迟和转换
-	if len(languages) > 0 {
-		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", strings.Join(languages, ","), "--convert-subs", "srt")
-	} else {
-		args = append(args, "--write-sub", "--write-auto-sub", "--sub-langs", "all", "--convert-subs", "srt")
-	}
-	// 严格最低分辨率
+	args = append(args, BuildYtDlpSubtitleArgs(languages)...)
 	if minHeight <= 0 {
 		minHeight = 1080
 	}
-	args = append(args, "-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight), "--merge-output-format", "mp4")
+	args = append(args, BuildYtDlpFormatArgsMinHeight(minHeight)...)
 	args = append(args, videoURL)
 	return args
 }
 
 // buildBestArgs 构建使用 bestvideo+bestaudio/best 的下载参数（最小化 headers）
 func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string) []string {
-	args := []string{
-		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		"--force-ipv4",
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--embed-thumbnail",
-		"--write-info-json",
-		"--write-description",
-	}
-	// 字幕
-	args = append(args, "--write-sub", "--write-auto-sub", "--convert-subs", "srt")
-	if len(languages) > 0 {
-		args = append(args, "--sub-langs", strings.Join(languages, ","))
-	} else {
-		args = append(args, "--sub-langs", "all")
-	}
-	// 重试与片段参数
-	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments", "--concurrent-fragments", "4")
-	// 指定格式与容器
-	args = append(args, "-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4")
+	args := []string{}
+	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
+	args = append(args, BuildYtDlpSubtitleArgs(languages)...)
+	args = append(args, BuildYtDlpStabilityArgs(config.Get())...)
+	args = append(args, BuildYtDlpFormatArgsBest1080()...)
 	args = append(args, videoURL)
 	return args
 }
 
 // buildBestArgsWithClient best 格式下载，按 client/是否带 cookies 构建 UA/headers
 func (d *downloader) buildBestArgsWithClient(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
-	args := []string{
-		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		"--force-ipv4",
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--embed-thumbnail",
-		"--write-info-json",
-		"--write-description",
-	}
+	args := []string{}
+	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
 	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// cookies
 	if includeCookies {
-		if d.cookiesFile != "" {
-			cookiesPath := d.cookiesFile
-			if !filepath.IsAbs(cookiesPath) {
-				if absPath, err := filepath.Abs(cookiesPath); err == nil {
-					cookiesPath = absPath
-				}
+		cookiesPath := d.cookiesFile
+		if cookiesPath != "" && !filepath.IsAbs(cookiesPath) {
+			if absPath, err := filepath.Abs(cookiesPath); err == nil {
+				cookiesPath = absPath
 			}
-			args = append(args, "--cookies", cookiesPath)
-		} else if d.cookiesFromBrowser != "" {
-			args = append(args, "--cookies-from-browser", d.cookiesFromBrowser)
 		}
+		args = append(args, BuildYtDlpCookiesArgs(true, cookiesPath, d.cookiesFromBrowser)...)
 	}
 	// 字幕
-	args = append(args, "--write-sub", "--write-auto-sub", "--convert-subs", "srt")
-	if len(languages) > 0 {
-		args = append(args, "--sub-langs", strings.Join(languages, ","))
-	} else {
-		args = append(args, "--sub-langs", "all")
-	}
-	// 重试与片段参数
-	args = append(args, "--retries", "3", "--fragment-retries", "3", "--skip-unavailable-fragments", "--concurrent-fragments", "4")
+	args = append(args, BuildYtDlpSubtitleArgs(languages)...)
+	// 重试与片段/延迟参数
+	args = append(args, BuildYtDlpStabilityArgs(config.Get())...)
 	// 指定格式与容器
-	args = append(args, "-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4")
+	args = append(args, BuildYtDlpFormatArgsBest1080()...)
 	args = append(args, videoURL)
 	return args
 }

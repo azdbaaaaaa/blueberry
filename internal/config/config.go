@@ -70,6 +70,18 @@ type YouTubeConfig struct {
 	MinHeight int `mapstructure:"min_height"`
 	// DisableAndroidFallback web 下载失败时，是否禁用回退到 android 客户端；默认 true（不回退，降低风控风险）
 	DisableAndroidFallback bool `mapstructure:"disable_android_fallback"`
+	// Retries yt-dlp --retries
+	Retries int `mapstructure:"retries"`
+	// FragmentRetries yt-dlp --fragment-retries
+	FragmentRetries int `mapstructure:"fragment_retries"`
+	// ConcurrentFragments yt-dlp --concurrent-fragments
+	ConcurrentFragments int `mapstructure:"concurrent_fragments"`
+	// SleepIntervalSeconds yt-dlp --sleep-interval（秒）
+	SleepIntervalSeconds int `mapstructure:"sleep_interval_seconds"`
+	// SleepRequestsSeconds yt-dlp --sleep-requests（秒）
+	SleepRequestsSeconds int `mapstructure:"sleep_requests_seconds"`
+	// SleepSubtitlesSeconds yt-dlp --sleep-subtitles（秒）
+	SleepSubtitlesSeconds int `mapstructure:"sleep_subtitles_seconds"`
 }
 
 // LoggingConfig 控制日志级别与输出路径
@@ -115,6 +127,12 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.force_download_undownloadable", false)
 	viper.SetDefault("youtube.min_height", 1080)
 	viper.SetDefault("youtube.disable_android_fallback", true)
+	viper.SetDefault("youtube.retries", 3)
+	viper.SetDefault("youtube.fragment_retries", 3)
+	viper.SetDefault("youtube.concurrent_fragments", 4)
+	viper.SetDefault("youtube.sleep_interval_seconds", 60)
+	viper.SetDefault("youtube.sleep_requests_seconds", 3)
+	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
 	viper.SetDefault("output.subtitle_archive", "./output")
 
 	if configPath != "" {
