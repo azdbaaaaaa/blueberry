@@ -140,6 +140,21 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return nil
 	}
 
+	// 在检查视频/图片等文件之前，先检查下载状态
+	if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+		if !downloaded {
+			logger.Warn().
+				Str("video_dir", videoDir).
+				Str("status", status).
+				Str("error", errMsg).
+				Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+			return nil
+		}
+	} else {
+		logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取下载状态失败，视为未完成，跳过上传")
+		return nil
+	}
+
 	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
 	// 优先选择英文字幕
 	subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
@@ -155,8 +170,9 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		Int("total_subtitles", len(allSubtitlePaths)).
 		Int("selected_subtitles", len(subtitlePaths)).
 		Msg("字幕文件选择完成")
-	// 使用 video_id 作为标题；若无法获取则回退到文件名
+	// 使用 video_id 作为标题；若无法获取则回退到文件名，同时获取描述（优先 .description）
 	videoTitle := ""
+	videoDesc := s.getVideoDescription(videoDir, videoFile)
 	if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
 		if id := strings.TrimSpace(info.ID); id != "" {
 			videoTitle = id
@@ -177,7 +193,7 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		logger.Warn().Err(err).Msg("标记上传状态失败")
 	}
 
-	result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
+	result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, videoDesc, subtitlePaths, account)
 	if err != nil {
 		logger.Error().Err(err).Msg("上传失败")
 		// 标记上传失败
@@ -329,6 +345,21 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
+		// 在检查视频/图片等文件之前，先检查下载状态
+		if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if !downloaded {
+				logger.Warn().
+					Str("video_id", videoID).
+					Str("status", status).
+					Str("error", errMsg).
+					Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+				continue
+			}
+		} else {
+			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，视为未完成，跳过上传")
+			continue
+		}
+
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
 		if err != nil {
 			logger.Warn().Str("title", title).Str("video_id", videoID).Msg("未找到本地视频文件，跳过")
@@ -351,8 +382,9 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			Int("selected_subtitles", len(subtitlePaths)).
 			Msg("字幕文件选择完成")
 
-		// 使用 video_id 作为标题
+		// 使用 video_id 作为标题，加载描述
 		videoTitle := videoID
+		videoDesc := s.getVideoDescription(videoDir, videoFile)
 
 		// 检查封面图是否存在（必需，上传器缺失时会直接退出）
 		coverPath, _ := s.fileManager.FindCoverFile(videoDir)
@@ -373,7 +405,7 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			logger.Warn().Err(err).Msg("标记上传状态失败")
 		}
 
-		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
+		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, videoDesc, subtitlePaths, account)
 		if err != nil {
 			errorMsg := err.Error()
 			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败，跳过该视频继续下一个")
@@ -518,6 +550,21 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			continue
 		}
 
+		// 在检查视频/图片等文件之前，先检查下载状态
+		if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if !downloaded {
+				logger.Warn().
+					Str("video_id", videoID).
+					Str("status", status).
+					Str("error", errMsg).
+					Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+				continue
+			}
+		} else {
+			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，视为未完成，跳过上传")
+			continue
+		}
+
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
 		if err != nil || videoFile == "" {
 			logger.Warn().Str("video_id", videoID).Str("video_dir", videoDir).Msg("未找到本地视频文件，跳过")
@@ -534,8 +581,9 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			logger.Info().Msg("已禁用字幕上传（bilibili.upload_subtitles=false）")
 		}
 
-		// 使用 video_id 作为标题
+		// 使用 video_id 作为标题，加载描述
 		videoTitle := videoID
+		videoDesc := s.getVideoDescription(videoDir, videoFile)
 
 		logger.Info().
 			Str("video_file", videoFile).
@@ -547,7 +595,7 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			logger.Warn().Err(err).Msg("标记上传状态失败")
 		}
 
-		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, subtitlePaths, account)
+		result, err := s.uploader.UploadVideo(ctx, videoFile, videoTitle, videoDesc, subtitlePaths, account)
 		if err != nil {
 			errorMsg := err.Error()
 			logger.Error().Err(err).Str("title", videoTitle).Msg("上传失败")
@@ -636,4 +684,22 @@ func (s *uploadService) UploadAllChannels(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// getVideoDescription 优先从与视频同名的 .description 文件读取描述，若不存在则回退到 video_info.json 的 Description
+func (s *uploadService) getVideoDescription(videoDir string, videoFile string) string {
+	base := strings.TrimSuffix(videoFile, filepath.Ext(videoFile))
+	descPath := base + ".description"
+	if data, err := os.ReadFile(descPath); err == nil {
+		if txt := strings.TrimSpace(string(data)); txt != "" {
+			return txt
+		}
+	}
+	// 回退 video_info.json
+	if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
+		if d := strings.TrimSpace(info.Description); d != "" {
+			return d
+		}
+	}
+	return ""
 }

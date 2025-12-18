@@ -19,7 +19,7 @@ import (
 )
 
 type Uploader interface {
-	UploadVideo(ctx context.Context, videoPath, videoTitle string, subtitlePaths []string, account config.Account) (*UploadResult, error)
+	UploadVideo(ctx context.Context, videoPath, videoTitle, videoDesc string, subtitlePaths []string, account config.Account) (*UploadResult, error)
 	CheckLoginStatus(ctx context.Context) (bool, error)
 }
 
@@ -44,7 +44,7 @@ func NewUploader(baseURL, cookiesFromBrowser, cookiesFile string) Uploader {
 	}
 }
 
-func (u *uploader) UploadVideo(ctx context.Context, videoPath, videoTitle string, subtitlePaths []string, account config.Account) (*UploadResult, error) {
+func (u *uploader) UploadVideo(ctx context.Context, videoPath, videoTitle, videoDesc string, subtitlePaths []string, account config.Account) (*UploadResult, error) {
 	result := &UploadResult{}
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -89,7 +89,7 @@ func (u *uploader) UploadVideo(ctx context.Context, videoPath, videoTitle string
 		return result, result.Error
 	}
 
-	videoID, err := u.uploadVideoFile(ctx, videoPath, videoTitle, subtitlePaths)
+	videoID, err := u.uploadVideoFile(ctx, videoPath, videoTitle, videoDesc, subtitlePaths)
 	if err != nil {
 		result.Error = fmt.Errorf("上传失败: %w", err)
 		return result, result.Error
@@ -227,7 +227,7 @@ func (u *uploader) login(ctx context.Context, account config.Account) error {
 	return nil
 }
 
-func (u *uploader) uploadVideoFile(ctx context.Context, videoPath, videoTitle string, subtitlePaths []string) (string, error) {
+func (u *uploader) uploadVideoFile(ctx context.Context, videoPath, videoTitle, videoDesc string, subtitlePaths []string) (string, error) {
 	logger.Info().Str("video_path", videoPath).Str("title", videoTitle).Msg("开始上传视频")
 
 	uploadURL := fmt.Sprintf("%s/upload", u.baseURL)

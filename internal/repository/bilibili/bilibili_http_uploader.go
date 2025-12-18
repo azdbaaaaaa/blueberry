@@ -56,7 +56,7 @@ func NewHTTPUploader(baseURL, cookiesFromBrowser, cookiesFile string) Uploader {
 }
 
 // UploadVideo 上传视频（HTTP 实现）
-func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle string, subtitlePaths []string, account config.Account) (*UploadResult, error) {
+func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle, videoDesc string, subtitlePaths []string, account config.Account) (*UploadResult, error) {
 	result := &UploadResult{}
 
 	// 确定使用的 cookies 配置（优先账号级别，否则全局）
@@ -182,7 +182,7 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle st
 			Str("publish", publishFilename).
 			Msg("移除 .mp4 后缀用于发布")
 	}
-	aid, err := u.publishVideo(ctx, publishFilename, videoTitle, coverURL, subtitleURL)
+	aid, err := u.publishVideo(ctx, publishFilename, videoTitle, coverURL, subtitleURL, videoDesc)
 	if err != nil {
 		return nil, fmt.Errorf("发布视频失败: %w", err)
 	}
@@ -1608,14 +1608,14 @@ func extractCoverFromVideo(ctx context.Context, videoPath string) (string, strin
 }
 
 // publishVideo 发布视频
-func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverURL, subtitleURL string) (string, error) {
+func (u *httpUploader) publishVideo(ctx context.Context, filename, title, coverURL, subtitleURL, desc string) (string, error) {
 	apiURL := u.buildAPIURL("/intl/videoup/web2/add")
 
 	// 构建发布数据
 	publishData := map[string]interface{}{
 		"title":            title,
 		"cover":            coverURL,
-		"desc":             "",
+		"desc":             desc,
 		"no_reprint":       true,
 		"filename":         filename,
 		"playlist_id":      "",
