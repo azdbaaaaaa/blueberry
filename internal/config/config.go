@@ -135,7 +135,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.disable_android_fallback", true)
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
-	viper.SetDefault("youtube.concurrent_fragments", 4)
+	viper.SetDefault("youtube.concurrent_fragments", 1)
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
