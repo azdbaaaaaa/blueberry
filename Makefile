@@ -11,58 +11,17 @@ REMOTE_HOST?=18.140.235.125
 REMOTE_PATH?=/home/worker/blueberry/cookies
 REMOTE_APP_DIR?=/home/worker/blueberry
 CONFIG_FILE?=config.yaml
+# Push command variables
+REMOTE_PUSH_USER?=root
+REMOTE_PUSH_HOST?=66.42.63.131
+REMOTE_PUSH_DIR?=/opt/blueberry
+SCRIPTS_DIR?=scripts
 
-.PHONY: build deps install run start stop logs sync-cookies sync-config
+.PHONY: build install run start stop logs sync-cookies sync-config push ssh-keygen ssh-add-key
 
 build:
 	mkdir -p $(BIN_DIR)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO_BIN) build -o $(BIN) .
-
-deps:
-	# 基础包管理器（Amazon Linux 2 用 yum，AL2023 用 dnf）
-	if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi; \
-	sudo $$PKG -y update || true; \
-	# 按需安装基础工具
-	for pkg in git tar xz curl; do \
-	if ! command -v $$pkg >/dev/null 2>&1; then sudo $$PKG -y install $$pkg || true; else echo "$$pkg already installed"; fi; \
-	done
-	# Python 构建依赖
-	sudo $$PKG -y install gcc gcc-c++ make zlib-devel bzip2-devel openssl-devel libffi-devel readline-devel sqlite-devel xz-devel || true
-	# 安装 pyenv（系统级）
-	if [ ! -d "$(PYENV_ROOT)" ]; then sudo git clone https://github.com/pyenv/pyenv.git $(PYENV_ROOT); else echo "pyenv already installed at $(PYENV_ROOT)"; fi
-	# 使用 pyenv 安装并设置 Python $(PY_VERSION)
-	export PYENV_ROOT=$(PYENV_ROOT); export PATH="$(PYENV_ROOT)/bin:$$PATH"; \
-	$(PYENV_ROOT)/bin/pyenv install -s $(PY_VERSION) && \
-	$(PYENV_ROOT)/bin/pyenv global $(PY_VERSION)
-	# 安装 Go 指定版本（$(GO_VERSION)）
-	if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$(GO_VERSION)"; then \
-	  echo "Installing Go $(GO_VERSION) ..."; \
-	  sudo rm -rf /usr/local/go; \
-	  curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/go$(GO_VERSION).linux-amd64.tar.gz || \
-	    curl -fsSL -o /tmp/go.tar.gz https://dl.google.com/go/go$(GO_VERSION).linux-amd64.tar.gz; \
-	  sudo tar -C /usr/local -xzf /tmp/go.tar.gz; \
-	  sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
-	  sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
-	else echo "Go $(GO_VERSION) already installed"; fi
-	# 安装/升级 yt-dlp（优先使用 pyenv Python）
-	if [ -x "$(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3" ]; then sudo $(PYENV_ROOT)/versions/$(PY_VERSION)/bin/pip3 install --upgrade yt-dlp; \
-	else sudo pip3 install --upgrade yt-dlp || true; fi
-	# 安装 Node.js 20（供 yt-dlp 执行 JS runtime）
-	if ! command -v node >/dev/null 2>&1; then \
-	  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && \
-	  sudo $$PKG -y install nodejs || true; \
-	else echo "node already installed"; fi
-	# 安装 ffmpeg/ffprobe（静态版）
-	if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then \
-	  sudo mkdir -p /usr/local/bin; \
-	  cd /usr/local/bin && \
-	    curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-	    tar -xf ffmpeg.tar.xz && \
-	    cd ffmpeg-*-static && \
-	    sudo cp ffmpeg ffprobe /usr/local/bin/ && \
-	    sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-	    cd .. && rm -f ffmpeg.tar.xz; \
-	else echo "ffmpeg/ffprobe already installed"; fi
 
 install: build
 	sudo mkdir -p /usr/local/$(APP_NAME)
@@ -97,6 +56,54 @@ sync-config:
 	@test -f $(CONFIG_FILE) || (echo "Config file '$(CONFIG_FILE)' not found" && exit 1)
 	ssh $(REMOTE_USER)@$(REMOTE_HOST) "mkdir -p $(REMOTE_APP_DIR)"
 	rsync -azP -e "ssh" $(CONFIG_FILE) $(REMOTE_USER)@$(REMOTE_HOST):$(REMOTE_APP_DIR)/config.yaml
+
+push: build
+	@echo "=========================================="
+	@echo "Pushing files to $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)"
+	@echo "=========================================="
+	@test -f $(BIN) || (echo "Error: Binary file '$(BIN)' not found. Run 'make build' first." && exit 1)
+	@test -d $(SCRIPTS_DIR) || (echo "Error: Scripts directory '$(SCRIPTS_DIR)' not found" && exit 1)
+	@SSH_OPTS=""; \
+	if [ -f $(SSH_KEY_PATH) ]; then \
+		SSH_OPTS="-i $(SSH_KEY_PATH)"; \
+		echo "Using SSH key: $(SSH_KEY_PATH)"; \
+	fi; \
+	echo "Creating remote directory..."; \
+	ssh $$SSH_OPTS $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST) "mkdir -p $(REMOTE_PUSH_DIR) && chmod 755 $(REMOTE_PUSH_DIR)"; \
+	echo "Pushing binary executable: $(BIN) -> $(REMOTE_PUSH_DIR)/$(APP_NAME)"; \
+	rsync -azP -e "ssh $$SSH_OPTS" $(BIN) $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$(APP_NAME); \
+	echo "Pushing scripts directory: $(SCRIPTS_DIR)/ -> $(REMOTE_PUSH_DIR)/$(SCRIPTS_DIR)/"; \
+	rsync -azP -e "ssh $$SSH_OPTS" $(SCRIPTS_DIR)/ $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$(SCRIPTS_DIR)/; \
+	if [ -f $(CONFIG_FILE) ]; then \
+		echo "Pushing config file: $(CONFIG_FILE) -> $(REMOTE_PUSH_DIR)/config.yaml"; \
+		rsync -azP -e "ssh $$SSH_OPTS" $(CONFIG_FILE) $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/config.yaml; \
+	else \
+		echo "Warning: Config file '$(CONFIG_FILE)' not found, skipping..."; \
+		echo "Tip: You can push config.yaml.example as a template if needed"; \
+	fi; \
+	if [ -f config.yaml.example ]; then \
+		echo "Pushing config template: config.yaml.example -> $(REMOTE_PUSH_DIR)/config.yaml.example"; \
+		rsync -azP -e "ssh $$SSH_OPTS" config.yaml.example $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/config.yaml.example; \
+	fi; \
+	echo "Setting executable permissions..."; \
+	ssh $$SSH_OPTS $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST) "chmod +x $(REMOTE_PUSH_DIR)/$(APP_NAME) && chmod +x $(REMOTE_PUSH_DIR)/$(SCRIPTS_DIR)/*.sh 2>/dev/null || true"; \
+	echo "=========================================="; \
+	echo "Push completed successfully!"; \
+	echo "Remote location: $(REMOTE_PUSH_DIR)"; \
+	echo "=========================================="
+
+# -------- SSH Key Management --------
+SSH_KEY_NAME?=id_rsa_blueberry
+SSH_KEY_PATH?=~/.ssh/$(SSH_KEY_NAME)
+SSH_KEY_PUB?=$(SSH_KEY_PATH).pub
+
+# Generate SSH key for server access (print command only)
+ssh-keygen:
+	@echo "ssh-keygen -t ed25519 -f $(SSH_KEY_PATH) -N \"\" -C \"blueberry-$(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST)\""
+
+# Add SSH public key to server authorized_keys (print command only)
+ssh-add-key:
+	@echo "echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCjUDQAgCK43S5PCPxyrZZWf9sozcUKWsgygguwmCfzU6YyENhYEDx07hzXyNYlxMrBuAk3pva0AQRPFk4TwWEkVvukMpLfwxFVxiGpF4Dq1F7cfevhPR91XpU4K7kjSLB/KML0b8LMtP7gK5b9+oge0F6r5UYEgMSjlWLsIU1mEmpnutR5B1sSXWKgUQoW957IvaGyb0buW7uH35Ndbl8dIDEdB7eTReCi8m13MdhM5MLbqrccnrCh+gsVSV/I35W9qlRIuJvWv0JkobnDmiTR1QuovctnDa5zxhZsfIqvZN+ItuymONHy8d1qPlfrCt5EE0EGUqk2yf04cbrR4eXKJadok0QZ5fpRjy0nBU5WvsVcj9jUPVX23sGCjurt2pqXsO/cKoRrwIaAAAKW4Ych48xKhDrgSvaZGpRzf1cOuZmUXNVLlT/jSvFDVWurITOFqNX8nx4Hti9/QCvB2u48uKfBvSnAvCMMhEcQF/yigPzTBYVwNT+hjUZY2aLErPE= jimmy@jimmydeMacBook-Pro.local' | cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
 
 # -------- Docker helpers --------
 IMAGE?=blueberry:latest
