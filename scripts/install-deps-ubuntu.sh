@@ -1,6 +1,6 @@
 #!/bin/bash
 # Blueberry 项目依赖安装脚本 - Ubuntu 22.04
-# 安装所有必需的依赖：Go, Git, FFmpeg, FFprobe, Python, yt-dlp, Chrome/Chromium, Node.js
+# 安装所有必需的依赖：Go, Git, FFmpeg, FFprobe, yt-dlp, Node.js
 
 set -e  # 遇到错误立即退出
 
@@ -21,15 +21,15 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo ""
-echo "步骤 1/7: 更新系统包列表..."
+echo "步骤 1/6: 更新系统包列表..."
 $SUDO apt-get update
 
 echo ""
-echo "步骤 2/7: 安装基础工具 (Git, curl, wget, tar, xz-utils)..."
+echo "步骤 2/6: 安装基础工具 (Git, curl, wget, tar, xz-utils)..."
 $SUDO apt-get install -y git curl wget tar xz-utils ca-certificates
 
 echo ""
-echo "步骤 3/7: 安装 Go 1.24.0..."
+echo "步骤 3/6: 安装 Go 1.24.0..."
 GO_VERSION="1.24.0"
 GO_INSTALL_DIR="/usr/local/go"
 
@@ -75,7 +75,7 @@ else
 fi
 
 echo ""
-echo "步骤 4/7: 安装 FFmpeg 和 FFprobe..."
+echo "步骤 4/6: 安装 FFmpeg 和 FFprobe..."
 if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
     echo "FFmpeg 和 FFprobe 已安装:"
     ffmpeg -version | head -n 1
@@ -86,7 +86,7 @@ else
 fi
 
 echo ""
-echo "步骤 5/7: 安装 yt-dlp (最新版本，官方推荐方式)..."
+echo "步骤 5/6: 安装 yt-dlp (最新版本，官方推荐方式)..."
 # 使用官方推荐的方式：直接从 GitHub releases 下载最新二进制文件
 YT_DLP_BIN="/usr/local/bin/yt-dlp"
 if command -v yt-dlp >/dev/null 2>&1; then
@@ -102,7 +102,7 @@ yt-dlp --version
 echo "✓ yt-dlp 安装成功"
 
 echo ""
-echo "步骤 6/7: 安装 Node.js 20.x (用于 yt-dlp JS runtime)..."
+echo "步骤 6/6: 安装 Node.js 20.x (用于 yt-dlp JS runtime)..."
 if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version)
     echo "Node.js 已安装: $NODE_VERSION"
@@ -126,28 +126,6 @@ npm --version
 echo "✓ Node.js 安装成功"
 
 echo ""
-echo "步骤 7/7: 安装 Chrome/Chromium (用于 chromedp)..."
-if command -v google-chrome >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
-    echo "Chrome/Chromium 已安装:"
-    if command -v google-chrome >/dev/null 2>&1; then
-        google-chrome --version
-    elif command -v chromium-browser >/dev/null 2>&1; then
-        chromium-browser --version
-    elif command -v chromium >/dev/null 2>&1; then
-        chromium --version
-    fi
-else
-    echo "正在安装 Chromium..."
-    $SUDO apt-get install -y chromium-browser
-    
-    # 创建符号链接（某些系统可能使用不同的命令名）
-    if [ ! -f /usr/local/bin/chromium ] && [ -f /usr/bin/chromium-browser ]; then
-        $SUDO ln -sf /usr/bin/chromium-browser /usr/local/bin/chromium
-    fi
-    echo "✓ Chromium 安装成功"
-fi
-
-echo ""
 echo "=========================================="
 echo "所有依赖安装完成！"
 echo "=========================================="
@@ -157,16 +135,9 @@ echo "-------------------"
 $GO_INSTALL_DIR/bin/go version
 git --version
 ffmpeg -version | head -n 1
-python3 --version
-pip3 --version
 yt-dlp --version
 node --version
 npm --version
-if command -v chromium-browser >/dev/null 2>&1; then
-    chromium-browser --version
-elif command -v chromium >/dev/null 2>&1; then
-    chromium --version
-fi
 
 echo ""
 echo "下一步："

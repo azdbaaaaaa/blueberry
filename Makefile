@@ -74,6 +74,14 @@ push: build
 	rsync -azP -e "ssh $$SSH_OPTS" $(BIN) $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$(APP_NAME); \
 	echo "Pushing scripts directory: $(SCRIPTS_DIR)/ -> $(REMOTE_PUSH_DIR)/$(SCRIPTS_DIR)/"; \
 	rsync -azP -e "ssh $$SSH_OPTS" $(SCRIPTS_DIR)/ $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$(SCRIPTS_DIR)/; \
+	if [ -d $(COOKIES_DIR) ]; then \
+		echo "Pushing cookies directory: $(COOKIES_DIR)/ -> $(REMOTE_PUSH_DIR)/$(COOKIES_DIR)/"; \
+		rsync -azP -e "ssh $$SSH_OPTS" $(COOKIES_DIR)/ $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$(COOKIES_DIR)/; \
+	else \
+		echo "Warning: Cookies directory '$(COOKIES_DIR)' not found, skipping..."; \
+	fi; \
+	echo "Creating downloads and output directories..."; \
+	ssh $$SSH_OPTS $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST) "mkdir -p $(REMOTE_PUSH_DIR)/downloads $(REMOTE_PUSH_DIR)/output && chmod 755 $(REMOTE_PUSH_DIR)/downloads $(REMOTE_PUSH_DIR)/output"; \
 	if [ -f $(CONFIG_FILE) ]; then \
 		echo "Pushing config file: $(CONFIG_FILE) -> $(REMOTE_PUSH_DIR)/config.yaml"; \
 		rsync -azP -e "ssh $$SSH_OPTS" $(CONFIG_FILE) $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/config.yaml; \
