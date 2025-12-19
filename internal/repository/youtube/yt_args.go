@@ -20,10 +20,12 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	}
 	retries := 3
 	fragmentRetries := 3
-	concurrentFragments := 4
+	concurrentFragments := 5
 	sleepInterval := 60
 	sleepRequests := 3
 	sleepSubtitles := 2
+	bufferSize := "1M"
+	fileAccessRetries := 5
 	if cfg != nil {
 		if cfg.YouTube.Retries > 0 {
 			retries = cfg.YouTube.Retries
@@ -43,6 +45,12 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		if cfg.YouTube.SleepSubtitlesSeconds > 0 {
 			sleepSubtitles = cfg.YouTube.SleepSubtitlesSeconds
 		}
+		if cfg.YouTube.BufferSize != "" {
+			bufferSize = cfg.YouTube.BufferSize
+		}
+		if cfg.YouTube.FileAccessRetries > 0 {
+			fileAccessRetries = cfg.YouTube.FileAccessRetries
+		}
 	}
 	// 为 sleep interval 添加 0%-50% 的随机变化
 	// 使用当前时间作为随机种子，确保每次调用都有不同的随机值
@@ -58,6 +66,8 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		"--concurrent-fragments", strconv.Itoa(concurrentFragments),
 		"--sleep-requests", strconv.Itoa(sleepRequests),
 		"--sleep-subtitles", strconv.Itoa(sleepSubtitles),
+		"--buffer-size", bufferSize,
+		"--file-access-retries", strconv.Itoa(fileAccessRetries),
 	}
 	// 添加限速参数（如果配置了）
 	if cfg != nil && cfg.YouTube.LimitRate != "" {

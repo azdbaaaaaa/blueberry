@@ -92,6 +92,10 @@ type YouTubeConfig struct {
 	SleepSubtitlesSeconds int `mapstructure:"sleep_subtitles_seconds"`
 	// LimitRate yt-dlp --limit-rate（限速，例如 "10M" 表示 10MB/s）
 	LimitRate string `mapstructure:"limit_rate"`
+	// BufferSize yt-dlp --buffer-size（缓冲区大小，例如 "1M" 表示 1MB）
+	BufferSize string `mapstructure:"buffer_size"`
+	// FileAccessRetries yt-dlp --file-access-retries（文件访问重试次数）
+	FileAccessRetries int `mapstructure:"file_access_retries"`
 	// DailyVideoLimit 每日视频爬取限制，达到限制后休眠到第二天（默认 80，0 表示不限制）
 	DailyVideoLimit int `mapstructure:"daily_video_limit"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
@@ -146,11 +150,13 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.disable_android_fallback", true)
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
-	viper.SetDefault("youtube.concurrent_fragments", 1)
+	viper.SetDefault("youtube.concurrent_fragments", 5)
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
 	viper.SetDefault("youtube.limit_rate", "20M")
+	viper.SetDefault("youtube.buffer_size", "1M")
+	viper.SetDefault("youtube.file_access_retries", 5)
 	viper.SetDefault("youtube.daily_video_limit", 80)
 	viper.SetDefault("output.subtitle_archive", "./output")
 
