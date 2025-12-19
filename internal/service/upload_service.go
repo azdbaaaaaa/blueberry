@@ -140,13 +140,14 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return nil
 	}
 
-	// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
-	if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-		if status == "downloading" {
+	// 在检查视频/图片等文件之前，检查下载状态是否完成
+	if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+		if status != "completed" || !downloaded {
 			logger.Warn().
 				Str("video_dir", videoDir).
 				Str("status", status).
-				Msg("视频正在下载中，跳过上传（稍后重试）")
+				Bool("downloaded", downloaded).
+				Msg("视频下载未完成，跳过上传（稍后重试）")
 			return nil
 		}
 	} else {
@@ -343,13 +344,14 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
-		// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
-		if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if status == "downloading" {
+		// 在检查视频/图片等文件之前，检查下载状态是否完成
+		if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if status != "completed" || !downloaded {
 				logger.Warn().
 					Str("video_id", videoID).
 					Str("status", status).
-					Msg("视频正在下载中，跳过上传（稍后重试）")
+					Bool("downloaded", downloaded).
+					Msg("视频下载未完成，跳过上传（稍后重试）")
 				continue
 			}
 		} else {
@@ -546,13 +548,14 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			continue
 		}
 
-		// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
-		if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if status == "downloading" {
+		// 在检查视频/图片等文件之前，检查下载状态是否完成
+		if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if status != "completed" || !downloaded {
 				logger.Warn().
 					Str("video_id", videoID).
 					Str("status", status).
-					Msg("视频正在下载中，跳过上传（稍后重试）")
+					Bool("downloaded", downloaded).
+					Msg("视频下载未完成，跳过上传（稍后重试）")
 				continue
 			}
 		} else {

@@ -205,7 +205,32 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		lastOutput = string(output)
 	}
 
-	// 所有尝试都失败了
+	// 所有尝试都失败了，但在返回错误前，检查视频文件是否已经成功下载
+	// 某些情况下（如缺少 ffprobe），yt-dlp 可能返回错误但实际已下载视频
+	videoFile, errFind := d.fileRepo.FindVideoFile(videoDir)
+	if errFind == nil && videoFile != "" {
+		// 视频文件存在，认为下载成功（即使 yt-dlp 返回了错误）
+		logger.Warn().
+			Str("video_url", videoURL).
+			Str("video_dir", videoDir).
+			Str("video_file", videoFile).
+			Str("output", previewForLog(lastOutput, 200)).
+			Msg("yt-dlp 返回错误，但检测到视频文件已存在，视为下载成功")
+		result.VideoPath = videoFile
+		if subtitleFiles, err := d.fileRepo.FindSubtitleFiles(videoDir); err == nil {
+			result.SubtitlePaths = subtitleFiles
+			d.cleanupFrameSrtFiles(videoDir)
+			result.SubtitlePaths = d.convertVTTToSRTIfNeeded(videoDir, result.SubtitlePaths)
+		}
+		result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
+		// 从文件名解析高度，标记是否至少为 1080p
+		if err := d.markHas1080p(videoDir, videoFile); err != nil {
+			logger.Warn().Err(err).Msg("标记 has_1080p 失败（忽略）")
+		}
+		return result, nil
+	}
+
+	// 所有尝试都失败了，且视频文件不存在
 	logger.Error().
 		Str("video_url", videoURL).
 		Str("video_dir", videoDir).

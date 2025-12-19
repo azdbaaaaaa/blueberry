@@ -98,7 +98,7 @@ func BuildYtDlpSubtitleArgs(languages []string) []string {
 
 // BuildYtDlpFormatArgsBest1080 builds best mode capped at 1080p with mkv merge.
 func BuildYtDlpFormatArgsBest1080() []string {
-	return []string{"-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mkv"}
+	return []string{"-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mp4"}
 }
 
 // BuildYtDlpFormatArgsMinHeight builds strict min-height selector with mp4 merge.
@@ -106,5 +106,5 @@ func BuildYtDlpFormatArgsMinHeight(minHeight int) []string {
 	if minHeight <= 0 {
 		minHeight = 1080
 	}
-	return []string{"-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight), "--merge-output-format", "mkv"}
+	return []string{"-f", fmt.Sprintf("bv*[height>=%d]+ba/b[height>=%d]", minHeight, minHeight), "--merge-output-format", "mp4"}
 }
