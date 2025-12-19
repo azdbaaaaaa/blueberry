@@ -298,7 +298,7 @@ func (d *downloader) choosePlayerClient(ctx context.Context, videoURL string) (s
 	var lastOut string
 	for _, client := range candidates {
 		args := []string{
-			"--force-ipv4",
+			"--force-ipv6",
 			"--list-formats",
 			"--extractor-args", fmt.Sprintf("youtube:player_client=%s", client),
 		}

@@ -150,7 +150,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
-	viper.SetDefault("youtube.limit_rate", "10M")
+	viper.SetDefault("youtube.limit_rate", "20M")
 	viper.SetDefault("youtube.daily_video_limit", 80)
 	viper.SetDefault("output.subtitle_archive", "./output")
 

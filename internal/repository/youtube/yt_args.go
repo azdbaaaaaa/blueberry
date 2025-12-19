@@ -66,11 +66,11 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	return args
 }
 
-// BuildYtDlpBaseArgs builds common, non-dynamic args (output template, ipv4, thumbnails, info json, description).
+// BuildYtDlpBaseArgs builds common, non-dynamic args (output template, ipv6, thumbnails, info json, description).
 func BuildYtDlpBaseArgs(videoDir string) []string {
 	return []string{
 		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		"--force-ipv4",
+		"--force-ipv6",
 		"--write-thumbnail",
 		"--convert-thumbnails", "jpg",
 		"--embed-thumbnail",
