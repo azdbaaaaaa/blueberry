@@ -38,6 +38,10 @@ type BilibiliConfig struct {
 type YouTubeChannel struct {
 	URL       string   `mapstructure:"url"`
 	Languages []string `mapstructure:"languages"` // 该频道需要下载的字幕语言，为空则使用全局配置或下载全部
+	// Limit: 该频道下载数量上限（用于大频道分片抓取）；<=0 表示不限制
+	Limit int `mapstructure:"limit"`
+	// Offset: 从第几个开始（基于 channel_info.json 顺序）；<0 表示从 0 开始
+	Offset int `mapstructure:"offset"`
 }
 
 type Account struct {
@@ -86,6 +90,9 @@ type YouTubeConfig struct {
 	SleepRequestsSeconds int `mapstructure:"sleep_requests_seconds"`
 	// SleepSubtitlesSeconds yt-dlp --sleep-subtitles（秒）
 	SleepSubtitlesSeconds int `mapstructure:"sleep_subtitles_seconds"`
+	// 运行期覆盖（命令行优先于配置），不从配置文件读取
+	LimitOverride  int `mapstructure:"-"`
+	OffsetOverride int `mapstructure:"-"`
 }
 
 // LoggingConfig 控制日志级别与输出路径

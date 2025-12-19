@@ -42,7 +42,38 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 		return fmt.Errorf("加载频道信息失败: %w", err)
 	}
 
-	logger.Info().Int("count", len(videoMaps)).Msg("从文件加载视频列表")
+	// 计算有效的 offset/limit（命令行覆盖配置）
+	offset := 0
+	limit := 0
+	if s.cfg.YouTube.OffsetOverride != 0 || s.cfg.YouTube.LimitOverride != 0 {
+		offset = s.cfg.YouTube.OffsetOverride
+		limit = s.cfg.YouTube.LimitOverride
+	} else {
+		offset = channel.Offset
+		limit = channel.Limit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	start := offset
+	end := len(videoMaps)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	if start > len(videoMaps) {
+		start = len(videoMaps)
+	}
+	if start < end {
+		videoMaps = videoMaps[start:end]
+	} else {
+		videoMaps = []map[string]interface{}{}
+	}
+
+	logger.Info().
+		Int("count", len(videoMaps)).
+		Int("offset", offset).
+		Int("limit", limit).
+		Msg("从文件加载视频列表（已应用 offset/limit）")
 
 	// 获取频道语言配置
 	languages := s.getChannelLanguages(channel)

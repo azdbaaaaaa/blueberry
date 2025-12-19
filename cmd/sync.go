@@ -23,6 +23,8 @@ import (
 var (
 	serialChannelURL string
 	serialAll        bool
+	syncLimit        int
+	syncOffset       int
 )
 
 // sync: 按视频顺序逐个下载完再上传（下载→上传为一个原子单元）
@@ -54,6 +56,12 @@ var syncCmd = &cobra.Command{
 		fileRepo := file.NewRepository(cfg.Output.Directory)
 
 		processChannel := func(ch config.YouTubeChannel) error {
+			// 命令行覆盖 offset/limit（优先于配置）
+			if syncLimit != 0 || syncOffset != 0 {
+				cfg.YouTube.LimitOverride = syncLimit
+				cfg.YouTube.OffsetOverride = syncOffset
+				logger.Info().Int("limit", syncLimit).Int("offset", syncOffset).Msg("应用命令行覆盖（sync）")
+			}
 			channelID := fileRepo.ExtractChannelID(ch.URL)
 			channelDir := filepath.Join(cfg.Output.Directory, channelID)
 
@@ -70,10 +78,39 @@ var syncCmd = &cobra.Command{
 				return fmt.Errorf("加载频道视频列表失败或为空: %w", err)
 			}
 
+			// 计算有效 offset/limit（命令行 > 配置）
+			offset := 0
+			limit := 0
+			if cfg.YouTube.OffsetOverride != 0 || cfg.YouTube.LimitOverride != 0 {
+				offset = cfg.YouTube.OffsetOverride
+				limit = cfg.YouTube.LimitOverride
+			} else {
+				offset = ch.Offset
+				limit = ch.Limit
+			}
+			if offset < 0 {
+				offset = 0
+			}
+			start := offset
+			end := len(videos)
+			if limit > 0 && start+limit < end {
+				end = start + limit
+			}
+			if start > len(videos) {
+				start = len(videos)
+			}
+			if start < end {
+				videos = videos[start:end]
+			} else {
+				videos = []map[string]interface{}{}
+			}
+
 			logger.Info().
 				Str("channel_id", channelID).
 				Int("count", len(videos)).
-				Msg("开始顺序处理频道视频")
+				Int("offset", offset).
+				Int("limit", limit).
+				Msg("开始顺序处理频道视频（已应用 offset/limit）")
 
 			for i, v := range videos {
 				videoID, _ := v["id"].(string)
@@ -157,6 +194,8 @@ var syncCmd = &cobra.Command{
 func init() {
 	syncCmd.Flags().StringVar(&serialChannelURL, "channel", "", "要顺序同步的频道URL")
 	syncCmd.Flags().BoolVar(&serialAll, "all", false, "顺序同步配置中所有频道")
+	syncCmd.Flags().IntVar(&syncLimit, "limit", 0, "限制下载的视频数量（>0 生效）")
+	syncCmd.Flags().IntVar(&syncOffset, "offset", 0, "下载起始偏移（从 0 开始）")
 	rootCmd.AddCommand(syncCmd)
 }
 

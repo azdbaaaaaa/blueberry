@@ -173,14 +173,20 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle, v
 	logger.Info().Str("filename", filename).Msg("视频上传完成")
 
 	// 5. 发布视频
-	// 注意：发布时 filename 不应该包含 .mp4 后缀
+	// 注意：发布时 filename 不应该包含视频文件后缀（.mp4, .mkv 等）
 	publishFilename := filename
-	if strings.HasSuffix(publishFilename, ".mp4") {
-		publishFilename = strings.TrimSuffix(publishFilename, ".mp4")
-		logger.Debug().
-			Str("original", filename).
-			Str("publish", publishFilename).
-			Msg("移除 .mp4 后缀用于发布")
+	// 移除常见的视频文件后缀
+	videoExts := []string{".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".m4v", ".3gp"}
+	for _, ext := range videoExts {
+		if strings.HasSuffix(publishFilename, ext) {
+			publishFilename = strings.TrimSuffix(publishFilename, ext)
+			logger.Debug().
+				Str("original", filename).
+				Str("publish", publishFilename).
+				Str("removed_ext", ext).
+				Msg("移除视频文件后缀用于发布")
+			break
+		}
 	}
 	aid, err := u.publishVideo(ctx, publishFilename, videoTitle, coverURL, subtitleURL, videoDesc)
 	if err != nil {

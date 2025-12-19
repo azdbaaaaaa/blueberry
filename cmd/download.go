@@ -17,6 +17,8 @@ import (
 var (
 	channelDir string
 	videoDir   string
+	dlLimit    int
+	dlOffset   int
 )
 
 var downloadCmd = &cobra.Command{
@@ -43,6 +45,13 @@ var downloadCmd = &cobra.Command{
 		ctx := context.Background()
 
 		downloadService := application.DownloadService
+
+		// 命令行覆盖配置（优先级高于配置文件）
+		if dlLimit != 0 || dlOffset != 0 {
+			cfg.YouTube.LimitOverride = dlLimit
+			cfg.YouTube.OffsetOverride = dlOffset
+			logger.Info().Int("limit", dlLimit).Int("offset", dlOffset).Msg("应用命令行覆盖（download）")
+		}
 
 		var errExecute error
 
@@ -133,5 +142,7 @@ var downloadCmd = &cobra.Command{
 func init() {
 	downloadCmd.Flags().StringVar(&channelDir, "channel-dir", "", "指定要下载的频道目录（例如：downloads/Comic-likerhythm）")
 	downloadCmd.Flags().StringVar(&videoDir, "video-dir", "", "指定要下载的视频目录（例如：downloads/Comic-likerhythm/videoTitle）")
+	downloadCmd.Flags().IntVar(&dlLimit, "limit", 0, "限制下载的视频数量（>0 生效）")
+	downloadCmd.Flags().IntVar(&dlOffset, "offset", 0, "下载起始偏移（从 0 开始）")
 	rootCmd.AddCommand(downloadCmd)
 }

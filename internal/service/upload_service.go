@@ -140,19 +140,17 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return nil
 	}
 
-	// 在检查视频/图片等文件之前，先检查下载状态
-	if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-		if !downloaded {
+	// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
+	if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+		if status == "downloading" {
 			logger.Warn().
 				Str("video_dir", videoDir).
 				Str("status", status).
-				Str("error", errMsg).
-				Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+				Msg("视频正在下载中，跳过上传（稍后重试）")
 			return nil
 		}
 	} else {
-		logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取下载状态失败，视为未完成，跳过上传")
-		return nil
+		logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取下载状态失败，继续后续检查")
 	}
 
 	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
@@ -345,19 +343,17 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
-		// 在检查视频/图片等文件之前，先检查下载状态
-		if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if !downloaded {
+		// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
+		if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if status == "downloading" {
 				logger.Warn().
 					Str("video_id", videoID).
 					Str("status", status).
-					Str("error", errMsg).
-					Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+					Msg("视频正在下载中，跳过上传（稍后重试）")
 				continue
 			}
 		} else {
-			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，视为未完成，跳过上传")
-			continue
+			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，继续后续检查")
 		}
 
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
@@ -550,19 +546,17 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			continue
 		}
 
-		// 在检查视频/图片等文件之前，先检查下载状态
-		if status, downloaded, errMsg, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if !downloaded {
+		// 在检查视频/图片等文件之前，仅检查是否“正在下载中”
+		if status, _, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
+			if status == "downloading" {
 				logger.Warn().
 					Str("video_id", videoID).
 					Str("status", status).
-					Str("error", errMsg).
-					Msg("视频下载未完成，跳过上传（不再检查视频/封面/字幕文件）")
+					Msg("视频正在下载中，跳过上传（稍后重试）")
 				continue
 			}
 		} else {
-			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，视为未完成，跳过上传")
-			continue
+			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，继续后续检查")
 		}
 
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
