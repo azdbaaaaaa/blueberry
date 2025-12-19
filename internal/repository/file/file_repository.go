@@ -14,6 +14,11 @@ type uploadCounters struct {
 	Counts map[string]int `json:"counts"`
 }
 
+type downloadCounters struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
+}
+
 func shortenErrorMessage(msg string) string {
 	s := strings.TrimSpace(msg)
 	if s == "" {
@@ -80,6 +85,9 @@ type Repository interface {
 	GetTodayUploadCount(account string) (int, error)
 	IncrementTodayUploadCount(account string) error
 	LoadTodayUploadCounts() (map[string]int, error)
+	// 每日下载计数
+	GetTodayDownloadCount() (int, error)
+	IncrementTodayDownloadCount() error
 	// 获取视频下载状态（status/downloaded/error）
 	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
 	// 标记是否存在（或已获得）1080p（或更高）的视频
@@ -1316,4 +1324,66 @@ func (r *repository) IncrementTodayUploadCount(account string) error {
 	}
 	uc.Counts[account] = uc.Counts[account] + 1
 	return r.saveCountersRaw(uc)
+}
+
+// ---------- 每日下载计数（按天） ----------
+
+func (r *repository) downloadCountersFile() string {
+	globalDir := filepath.Join(r.outputDir, ".global")
+	_ = os.MkdirAll(globalDir, 0755)
+	return filepath.Join(globalDir, "download_counters.json")
+}
+
+func (r *repository) loadDownloadCountersRaw() (*downloadCounters, error) {
+	path := r.downloadCountersFile()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// 不存在则初始化
+		return &downloadCounters{
+			Date:  time.Now().Format("2006-01-02"),
+			Count: 0,
+		}, nil
+	}
+	var dc downloadCounters
+	if err := json.Unmarshal(data, &dc); err != nil {
+		return &downloadCounters{
+			Date:  time.Now().Format("2006-01-02"),
+			Count: 0,
+		}, nil
+	}
+	// 跨天则重置
+	today := time.Now().Format("2006-01-02")
+	if dc.Date != today {
+		dc = downloadCounters{
+			Date:  today,
+			Count: 0,
+		}
+	}
+	return &dc, nil
+}
+
+func (r *repository) saveDownloadCountersRaw(dc *downloadCounters) error {
+	path := r.downloadCountersFile()
+	data, err := json.MarshalIndent(dc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (r *repository) GetTodayDownloadCount() (int, error) {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return 0, err
+	}
+	return dc.Count, nil
+}
+
+func (r *repository) IncrementTodayDownloadCount() error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.Count = dc.Count + 1
+	return r.saveDownloadCountersRaw(dc)
 }

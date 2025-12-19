@@ -90,6 +90,10 @@ type YouTubeConfig struct {
 	SleepRequestsSeconds int `mapstructure:"sleep_requests_seconds"`
 	// SleepSubtitlesSeconds yt-dlp --sleep-subtitles（秒）
 	SleepSubtitlesSeconds int `mapstructure:"sleep_subtitles_seconds"`
+	// LimitRate yt-dlp --limit-rate（限速，例如 "10M" 表示 10MB/s）
+	LimitRate string `mapstructure:"limit_rate"`
+	// DailyVideoLimit 每日视频爬取限制，达到限制后休眠到第二天（默认 80，0 表示不限制）
+	DailyVideoLimit int `mapstructure:"daily_video_limit"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
 	OffsetOverride int `mapstructure:"-"`
@@ -146,6 +150,8 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
+	viper.SetDefault("youtube.limit_rate", "10M")
+	viper.SetDefault("youtube.daily_video_limit", 80)
 	viper.SetDefault("output.subtitle_archive", "./output")
 
 	if configPath != "" {

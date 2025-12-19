@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"time"
@@ -78,6 +79,9 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 	// 获取频道语言配置
 	languages := s.getChannelLanguages(channel)
 
+	// 初始化每日下载计数器
+	s.resetDailyCounterIfNeeded()
+
 	// 遍历每个视频，逐个下载
 	for i, videoMap := range videoMaps {
 		videoID, _ := videoMap["id"].(string)
@@ -115,6 +119,13 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 			}
 		}
 
+		// 检查每日下载限制
+		if s.isDailyLimitReached() {
+			sleepUntilNextDay(ctx)
+			// 重置计数器后继续
+			s.resetDailyCounterIfNeeded()
+		}
+
 		// 使用统一的下载逻辑
 		// 判断调用前后是否真的触发了下载（用于决定是否添加间隔）
 		downloadedBefore := s.fileManager.IsVideoDownloaded(videoDir)
@@ -127,17 +138,131 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 			continue
 		}
 
+		// 如果成功下载了新视频，增加计数器
+		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
+		if downloadedAfter && !downloadedBefore {
+			s.incrementDailyCounter()
+		}
+
 		// 在下载每个视频后添加延迟，避免触发 429 错误
 		// 字幕下载已经通过 --sleep-subtitles 参数添加了延迟，这里再添加一个整体延迟
-		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
+		// 使用配置的 sleep_interval_seconds 作为基础值，加上 0%-50% 的随机变化
 		if i < len(videoMaps)-1 && downloadedAfter && !downloadedBefore {
-			delay := 3 * time.Second
-			logger.Debug().Dur("delay", delay).Msg("下载完成，等待后继续下一个视频")
+			baseDelay := 3 * time.Second // 默认值
+			if s.cfg != nil && s.cfg.YouTube.SleepIntervalSeconds > 0 {
+				baseDelay = time.Duration(s.cfg.YouTube.SleepIntervalSeconds) * time.Second
+			}
+			// 添加 0%-50% 的随机变化
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			randomFactor := 1.0 + rng.Float64()*0.5 // 1.0 到 1.5 之间的随机值
+			delay := time.Duration(float64(baseDelay) * randomFactor)
+			logger.Debug().Dur("delay", delay).Dur("base_delay", baseDelay).Float64("random_factor", randomFactor).Msg("下载完成，等待后继续下一个视频")
 			time.Sleep(delay)
 		}
 	}
 
 	return nil
+}
+
+// resetDailyCounterIfNeeded 检查日期，如果是新的一天则重置计数器（从文件加载）
+func (s *downloadService) resetDailyCounterIfNeeded() {
+	today := time.Now().Format("2006-01-02")
+	// 从文件加载当前计数
+	count, err := s.fileManager.GetTodayDownloadCount()
+	if err != nil {
+		logger.Warn().Err(err).Msg("加载每日下载计数失败，使用内存计数器")
+		// 如果加载失败，使用内存计数器作为后备
+		if s.dailyDownloadDate != today {
+			s.dailyDownloadCount = 0
+			s.dailyDownloadDate = today
+			logger.Info().
+				Str("date", today).
+				Msg("新的一天，重置每日下载计数器（内存）")
+		}
+		return
+	}
+	// 更新内存计数器
+	s.dailyDownloadCount = count
+	s.dailyDownloadDate = today
+	if count == 0 {
+		logger.Info().
+			Str("date", today).
+			Msg("新的一天，每日下载计数器已重置")
+	}
+}
+
+// incrementDailyCounter 增加每日下载计数器（持久化到文件）
+func (s *downloadService) incrementDailyCounter() {
+	err := s.fileManager.IncrementTodayDownloadCount()
+	if err != nil {
+		logger.Warn().Err(err).Msg("保存每日下载计数失败，使用内存计数器")
+		// 如果保存失败，使用内存计数器作为后备
+		s.dailyDownloadCount++
+	} else {
+		// 从文件重新加载以确保同步
+		count, loadErr := s.fileManager.GetTodayDownloadCount()
+		if loadErr == nil {
+			s.dailyDownloadCount = count
+		} else {
+			s.dailyDownloadCount++
+		}
+	}
+	logger.Info().
+		Int("daily_count", s.dailyDownloadCount).
+		Int("limit", s.getDailyLimit()).
+		Msg("每日下载计数更新")
+}
+
+// isDailyLimitReached 检查是否达到每日下载限制
+func (s *downloadService) isDailyLimitReached() bool {
+	limit := s.getDailyLimit()
+	if limit <= 0 {
+		return false // 0 或负数表示不限制
+	}
+	// 优先从文件加载，确保准确性
+	count, err := s.fileManager.GetTodayDownloadCount()
+	if err != nil {
+		logger.Warn().Err(err).Msg("加载每日下载计数失败，使用内存计数器")
+		// 如果加载失败，使用内存计数器
+		return s.dailyDownloadCount >= limit
+	}
+	// 更新内存计数器
+	s.dailyDownloadCount = count
+	return count >= limit
+}
+
+// getDailyLimit 获取每日下载限制
+func (s *downloadService) getDailyLimit() int {
+	if s.cfg != nil && s.cfg.YouTube.DailyVideoLimit > 0 {
+		return s.cfg.YouTube.DailyVideoLimit
+	}
+	return 80 // 默认值
+}
+
+// sleepUntilNextDay 休眠到第二天
+func sleepUntilNextDay(ctx context.Context) {
+	now := time.Now()
+	// 计算明天的 00:00:00
+	nextDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	duration := nextDay.Sub(now)
+
+	logger.Info().
+		Dur("sleep_duration", duration).
+		Time("wake_up_time", nextDay).
+		Msg("已达到每日下载限制，休眠到第二天")
+
+	// 使用 context 的 Done channel 来支持取消
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		logger.Info().Msg("休眠被取消")
+		return
+	case <-timer.C:
+		logger.Info().Msg("休眠结束，新的一天开始")
+		return
+	}
 }
 
 // DownloadVideoDir 下载指定视频目录的视频

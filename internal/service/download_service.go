@@ -52,6 +52,9 @@ type downloadService struct {
 	subtitleManager youtube.SubtitleManager
 	fileManager     file.Repository
 	cfg             *config.Config
+	// 每日下载计数器
+	dailyDownloadCount int
+	dailyDownloadDate  string // 格式: YYYY-MM-DD
 }
 
 // NewDownloadService 创建并返回一个新的 DownloadService 实例
@@ -381,8 +384,18 @@ func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *
 			Msg("待下载状态文件已生成/更新")
 	}
 
+	// 初始化每日下载计数器
+	s.resetDailyCounterIfNeeded()
+
 	// 遍历每个视频，逐个下载（不使用并发）
 	for i, videoMap := range videoMaps {
+		// 检查每日下载限制
+		if s.isDailyLimitReached() {
+			sleepUntilNextDay(ctx)
+			// 重置计数器后继续
+			s.resetDailyCounterIfNeeded()
+		}
+
 		// 从 map 中提取基本信息
 		videoID, _ := videoMap["id"].(string)
 		title, _ := videoMap["title"].(string)
@@ -447,10 +460,17 @@ func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *
 		}
 
 		// 调用公共的下载视频方法
+		downloadedBefore := videoDownloaded
 		if err := s.downloadVideoAndSaveInfo(ctx, channelID, videoID, title, url, languages, videoMap); err != nil {
 			logger.Error().Err(err).Str("title", title).Str("video_id", videoID).Msg("下载视频失败")
 			// 下载失败时，状态文件已经在 downloadVideoAndSaveInfo 中更新为 failed
 			continue
+		}
+
+		// 如果成功下载了新视频，增加计数器
+		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
+		if downloadedAfter && !downloadedBefore {
+			s.incrementDailyCounter()
 		}
 	}
 

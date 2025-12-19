@@ -2,10 +2,12 @@ package youtube
 
 import (
 	"fmt"
+	"math/rand"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"blueberry/internal/config"
 )
@@ -42,14 +44,24 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 			sleepSubtitles = cfg.YouTube.SleepSubtitlesSeconds
 		}
 	}
+	// 为 sleep interval 添加 0%-50% 的随机变化
+	// 使用当前时间作为随机种子，确保每次调用都有不同的随机值
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomFactor := 1.0 + rng.Float64()*0.5 // 1.0 到 1.5 之间的随机值
+	sleepIntervalWithRandom := int(float64(sleepInterval) * randomFactor)
+
 	args := []string{
 		"--retries", strconv.Itoa(retries),
 		"--fragment-retries", strconv.Itoa(fragmentRetries),
 		"--skip-unavailable-fragments",
-		"--sleep-interval", strconv.Itoa(sleepInterval),
+		"--sleep-interval", strconv.Itoa(sleepIntervalWithRandom),
 		"--concurrent-fragments", strconv.Itoa(concurrentFragments),
 		"--sleep-requests", strconv.Itoa(sleepRequests),
 		"--sleep-subtitles", strconv.Itoa(sleepSubtitles),
+	}
+	// 添加限速参数（如果配置了）
+	if cfg != nil && cfg.YouTube.LimitRate != "" {
+		args = append(args, "--limit-rate", cfg.YouTube.LimitRate)
 	}
 	return args
 }
