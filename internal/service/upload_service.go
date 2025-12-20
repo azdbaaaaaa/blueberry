@@ -203,13 +203,17 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 	}
 
 	if result.Success {
-		logger.Info().Str("video_id", result.VideoID).Msg("上传成功")
+		logger.Info().
+			Str("video_id", result.VideoID).
+			Str("account", accountName).
+			Str("userid", account.UserID).
+			Msg("上传成功")
 		// 增加账号当日上传计数
 		if err := s.fileManager.IncrementTodayUploadCount(accountName); err != nil {
 			logger.Warn().Err(err).Str("account", accountName).Msg("更新账号当日上传计数失败")
 		}
 		// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
-		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
+		if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName, account.UserID); err != nil {
 			logger.Warn().Err(err).Msg("标记上传完成状态失败")
 		} else {
 			logger.Info().
@@ -426,10 +430,12 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 				Str("bilibili_aid", result.VideoID).
 				Str("title", videoTitle).
 				Str("video_dir", videoDir).
+				Str("account", accountName).
+				Str("userid", account.UserID).
 				Msg("视频上传并发布成功")
 
 			// 标记上传完成（保存到 upload_status.json，下次运行时会跳过）
-			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
+			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName, account.UserID); err != nil {
 				logger.Warn().Err(err).Msg("标记上传完成状态失败")
 			} else {
 				logger.Info().
@@ -612,8 +618,13 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 		}
 
 		if result.Success && result.VideoID != "" {
-			logger.Info().Str("video_id", result.VideoID).Str("title", videoTitle).Msg("视频上传并发布成功")
-			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName); err != nil {
+			logger.Info().
+				Str("video_id", result.VideoID).
+				Str("title", videoTitle).
+				Str("account", accountName).
+				Str("userid", account.UserID).
+				Msg("视频上传并发布成功")
+			if err := s.fileManager.MarkVideoUploaded(videoDir, result.VideoID, accountName, account.UserID); err != nil {
 				logger.Warn().Err(err).Msg("标记上传完成状态失败")
 			}
 			// 按配置删除本地原视频文件

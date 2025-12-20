@@ -45,10 +45,9 @@ type YouTubeChannel struct {
 }
 
 type Account struct {
-	Username           string `mapstructure:"username"`
-	Password           string `mapstructure:"password"`
-	CookiesFromBrowser string `mapstructure:"cookies_from_browser"` // 账号级别的 cookies 配置（从浏览器导入，仅本地开发环境使用）
-	CookiesFile        string `mapstructure:"cookies_file"`         // 账号级别的 cookies 文件路径（优先于全局配置）
+	Username    string `mapstructure:"username"`
+	UserID      string `mapstructure:"userid"`       // B站用户ID
+	CookiesFile string `mapstructure:"cookies_file"` // 账号级别的 cookies 文件路径（优先于全局配置）
 }
 
 type SubtitlesConfig struct {
@@ -229,11 +228,10 @@ func validate(cfg *Config) error {
 		if account.Username == "" {
 			return fmt.Errorf("账号 %s 的用户名不能为空", accountName)
 		}
-		// 如果配置了 cookies 文件（账号级别或全局），密码可以为空（使用 cookies 登录）
-		hasCookies := account.CookiesFile != "" || account.CookiesFromBrowser != "" ||
-			cfg.Bilibili.CookiesFile != "" || cfg.Bilibili.CookiesFromBrowser != ""
-		if account.Password == "" && !hasCookies {
-			return fmt.Errorf("账号 %s 的密码不能为空（或配置 cookies 文件）", accountName)
+		// 必须配置 cookies 文件（账号级别或全局）
+		hasCookies := account.CookiesFile != "" || cfg.Bilibili.CookiesFile != ""
+		if !hasCookies {
+			return fmt.Errorf("账号 %s 必须配置 cookies 文件", accountName)
 		}
 	}
 

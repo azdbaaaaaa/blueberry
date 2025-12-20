@@ -64,20 +64,16 @@ func (u *uploader) UploadVideo(ctx context.Context, videoPath, videoTitle, video
 
 	// 加载 cookies（优先使用账号级别的配置，否则使用全局配置）
 	cookiesFile := account.CookiesFile
-	cookiesFromBrowser := account.CookiesFromBrowser
 	if cookiesFile == "" {
 		cookiesFile = u.cookiesFile
 	}
-	if cookiesFromBrowser == "" {
-		cookiesFromBrowser = u.cookiesFromBrowser
-	}
 
 	// 如果账号有独立的 cookies 配置，使用账号的配置
-	if cookiesFile != "" || cookiesFromBrowser != "" {
-		if err := u.loadCookiesWithConfig(ctx, cookiesFile, cookiesFromBrowser); err != nil {
+	if cookiesFile != "" {
+		if err := u.loadCookiesWithConfig(ctx, cookiesFile, ""); err != nil {
 			logger.Warn().Err(err).Msg("加载 cookies 失败，将尝试正常登录")
 		}
-	} else if u.cookiesFile != "" || u.cookiesFromBrowser != "" {
+	} else if u.cookiesFile != "" {
 		// 否则使用全局配置
 		if err := u.loadCookies(ctx); err != nil {
 			logger.Warn().Err(err).Msg("加载 cookies 失败，将尝试正常登录")
@@ -139,13 +135,6 @@ func (u *uploader) login(ctx context.Context, account config.Account) error {
 				`.username-input`,
 			}
 
-			passwordSelectors := []string{
-				`input[name="password"]`,
-				`input[type="password"]`,
-				`#password`,
-				`.password-input`,
-			}
-
 			loginButtonSelectors := []string{
 				`button[type="submit"]`,
 				`button:contains("登录")`,
@@ -154,7 +143,7 @@ func (u *uploader) login(ctx context.Context, account config.Account) error {
 				`#login-button`,
 			}
 
-			var usernameFound, passwordFound bool
+			var usernameFound bool
 
 			// 尝试填写用户名
 			for _, selector := range usernameSelectors {
@@ -170,23 +159,10 @@ func (u *uploader) login(ctx context.Context, account config.Account) error {
 				logger.Warn().Msg("未找到用户名输入框，可能需要手动填写")
 			}
 
-			// 尝试填写密码
-			for _, selector := range passwordSelectors {
-				if err := chromedp.SendKeys(selector, account.Password, chromedp.ByQuery).Do(ctx); err == nil {
-					logger.Info().Str("selector", selector).Msg("已填写密码")
-					passwordFound = true
-					chromedp.Sleep(500 * time.Millisecond)
-					break
-				}
-			}
-
-			if !passwordFound {
-				logger.Warn().Msg("未找到密码输入框，可能需要手动填写")
-			}
-
-			// 如果自动填写失败，提示用户手动填写
-			if !usernameFound || !passwordFound {
-				logger.Info().Msg("自动填写失败，请在浏览器中手动填写用户名和密码")
+			// 密码已移除，仅使用 cookies 登录
+			// 如果未找到用户名输入框，提示用户手动填写
+			if !usernameFound {
+				logger.Info().Msg("未找到用户名输入框，请确保已通过 cookies 登录，或手动填写用户名和密码")
 				logger.Info().Msg("填写完成后，程序将自动检测登录状态")
 				// 等待用户手动登录（最多等待5分钟）
 				chromedp.Sleep(5 * time.Minute)
