@@ -281,32 +281,32 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 
 	channelID := s.fileManager.ExtractChannelID(channelURL)
 
-	// 加载频道信息（从 channel_info.json 或直接扫描目录）
-	var videos []map[string]interface{}
-	channelInfo, err := s.fileManager.LoadChannelInfo(channelID)
-	if err == nil && len(channelInfo) > 0 {
-		videos = channelInfo
-		logger.Info().Int("count", len(videos)).Msg("从频道信息文件加载视频列表")
-	} else {
-		// 如果没有频道信息文件，尝试从目录中扫描
-		logger.Info().Msg("未找到频道信息文件，从目录扫描视频")
-		// 这里可以添加目录扫描逻辑，但为了简化，我们使用解析器
-		ytVideos, err := s.parser.ExtractVideosFromChannel(ctx, channelURL)
-		if err != nil {
-			logger.Error().Err(err).Msg("解析频道失败")
-			return err
-		}
-		// 转换为 map 格式
-		for _, v := range ytVideos {
-			videos = append(videos, map[string]interface{}{
-				"id":    v.ID,
-				"title": v.Title,
-				"url":   v.URL,
-			})
-		}
+	// 直接从目录扫描视频文件夹
+	logger.Info().Str("channel_id", channelID).Msg("从目录扫描视频")
+	channelDir := filepath.Join(s.cfg.Output.Directory, channelID)
+	entries, err := os.ReadDir(channelDir)
+	if err != nil {
+		logger.Error().Err(err).Str("channel_dir", channelDir).Msg("读取频道目录失败")
+		return fmt.Errorf("读取频道目录失败: %w", err)
 	}
 
-	logger.Info().Int("count", len(videos)).Msg("找到视频")
+	var videos []map[string]interface{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// 跳过特殊目录
+		if e.Name() == ".global" {
+			continue
+		}
+		videoID := e.Name()
+		videos = append(videos, map[string]interface{}{
+			"id":    videoID,
+			"title": "",
+			"url":   "",
+		})
+	}
+	logger.Info().Int("count", len(videos)).Msg("从目录扫描找到视频文件夹")
 
 	for i, videoMap := range videos {
 		videoID, _ := videoMap["id"].(string)
@@ -495,32 +495,30 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 	// 推导 channelID（目录名）
 	channelID := filepath.Base(channelDir)
 
-	// 尝试加载 channel_info.json
-	var videos []map[string]interface{}
-	if info, err := s.fileManager.LoadChannelInfo(channelID); err == nil && len(info) > 0 {
-		videos = info
-		logger.Info().Int("count", len(videos)).Msg("从频道信息文件加载视频列表")
-	} else {
-		// 目录扫描：遍历子目录作为视频目录
-		logger.Info().Str("channel_dir", channelDir).Msg("未找到频道信息文件，从目录扫描视频")
-		entries, err := os.ReadDir(channelDir)
-		if err != nil {
-			return fmt.Errorf("读取频道目录失败: %w", err)
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			videoID := e.Name()
-			videos = append(videos, map[string]interface{}{
-				"id":    videoID,
-				"title": "",
-				"url":   "",
-			})
-		}
+	// 直接从目录扫描视频文件夹
+	logger.Info().Str("channel_dir", channelDir).Msg("从目录扫描视频")
+	entries, err := os.ReadDir(channelDir)
+	if err != nil {
+		return fmt.Errorf("读取频道目录失败: %w", err)
 	}
 
-	logger.Info().Int("count", len(videos)).Msg("找到视频")
+	var videos []map[string]interface{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// 跳过特殊目录
+		if e.Name() == ".global" {
+			continue
+		}
+		videoID := e.Name()
+		videos = append(videos, map[string]interface{}{
+			"id":    videoID,
+			"title": "",
+			"url":   "",
+		})
+	}
+	logger.Info().Int("count", len(videos)).Msg("从目录扫描找到视频文件夹")
 
 	for i, videoMap := range videos {
 		videoID, _ := videoMap["id"].(string)

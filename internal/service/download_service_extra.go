@@ -284,31 +284,27 @@ func (s *downloadService) getDownloadLimit() int {
 	return 60 // 默认值
 }
 
-// restAfterLimit 达到限制后休息7-8小时
+// restAfterLimit 达到限制后休息
 func (s *downloadService) restAfterLimit(ctx context.Context) {
 	// 获取休息时长配置
-	restMin := 420 // 默认7小时 = 420分钟
-	restMax := 480 // 默认8小时 = 480分钟
-	if s.cfg != nil {
-		if s.cfg.YouTube.RestDurationMin > 0 {
-			restMin = s.cfg.YouTube.RestDurationMin
-		}
-		if s.cfg.YouTube.RestDurationMax > 0 {
-			restMax = s.cfg.YouTube.RestDurationMax
-		}
+	restBase := 120 // 默认2小时 = 120分钟
+	if s.cfg != nil && s.cfg.YouTube.VideoLimitRestDuration > 0 {
+		restBase = s.cfg.YouTube.VideoLimitRestDuration
 	}
 
-	// 生成随机休息时间（分钟）
+	// 生成随机休息时间：基础时间 + 0-10% 的随机变化
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	restMinutes := restMin + rng.Intn(restMax-restMin+1)
+	randomFactor := 1.0 + rng.Float64()*0.1 // 1.0 到 1.1 之间的随机值
+	restMinutes := int(float64(restBase) * randomFactor)
 	restDuration := time.Duration(restMinutes) * time.Minute
 	restUntil := time.Now().Add(restDuration)
 
 	logger.Warn().
 		Int("download_count", s.dailyDownloadCount).
 		Int("limit", s.getDownloadLimit()).
-		Dur("rest_duration", restDuration).
+		Int("rest_base_minutes", restBase).
 		Int("rest_minutes", restMinutes).
+		Dur("rest_duration", restDuration).
 		Time("rest_until", restUntil).
 		Msg("达到下载限制，开始休息")
 
@@ -404,26 +400,64 @@ func (s *downloadService) isBotDetectionError(err error) bool {
 		errors.Is(err, youtube.ErrBotDetection)
 }
 
-// handleBotDetection 处理 bot detection，累计计数并在达到10次时休息
+// handleBotDetection 处理 bot detection，累计计数并在达到阈值时休息
 func (s *downloadService) handleBotDetection(ctx context.Context) {
-	s.botDetectionCount++
+	// 获取触发阈值配置
+	threshold := 10 // 默认10次
+	if s.cfg != nil && s.cfg.YouTube.BotDetectionThreshold > 0 {
+		threshold = s.cfg.YouTube.BotDetectionThreshold
+	}
+
+	// 从文件加载当前计数
+	currentCount, err := s.fileManager.GetBotDetectionCount()
+	if err != nil {
+		logger.Warn().Err(err).Msg("加载 bot detection 计数失败，使用内存计数器")
+		s.botDetectionCount++
+		currentCount = s.botDetectionCount
+	} else {
+		// 增加计数并保存到文件
+		if err := s.fileManager.IncrementBotDetectionCount(); err != nil {
+			logger.Warn().Err(err).Msg("保存 bot detection 计数失败，使用内存计数器")
+			s.botDetectionCount++
+			currentCount = s.botDetectionCount
+		} else {
+			// 重新加载以获取最新值
+			if newCount, loadErr := s.fileManager.GetBotDetectionCount(); loadErr == nil {
+				currentCount = newCount
+				s.botDetectionCount = newCount
+			} else {
+				s.botDetectionCount++
+				currentCount = s.botDetectionCount
+			}
+		}
+	}
+
 	logger.Warn().
-		Int("bot_detection_count", s.botDetectionCount).
-		Int("threshold", 10).
+		Int("bot_detection_count", currentCount).
+		Int("threshold", threshold).
 		Msg("检测到 bot detection，累计计数")
 
-	// 达到10次时，休息8-12分钟
-	if s.botDetectionCount >= 10 {
-		// 生成8-12分钟的随机休息时间
+	// 达到阈值时，休息
+	if currentCount >= threshold {
+		// 获取休息时长配置
+		restBase := 60 // 默认1小时 = 60分钟
+		if s.cfg != nil && s.cfg.YouTube.BotDetectionRestDuration > 0 {
+			restBase = s.cfg.YouTube.BotDetectionRestDuration
+		}
+
+		// 生成随机休息时间：基础时间 + 0-10% 的随机变化
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		restMinutes := 8 + rng.Intn(5) // 8-12分钟
+		randomFactor := 1.0 + rng.Float64()*0.1 // 1.0 到 1.1 之间的随机值
+		restMinutes := int(float64(restBase) * randomFactor)
 		restDuration := time.Duration(restMinutes) * time.Minute
 
 		logger.Warn().
-			Int("bot_detection_count", s.botDetectionCount).
-			Dur("rest_duration", restDuration).
+			Int("bot_detection_count", currentCount).
+			Int("threshold", threshold).
+			Int("rest_base_minutes", restBase).
 			Int("rest_minutes", restMinutes).
-			Msg("Bot detection 累计达到10次，开始休息")
+			Dur("rest_duration", restDuration).
+			Msg("Bot detection 累计达到阈值，开始休息")
 
 		// 休息
 		timer := time.NewTimer(restDuration)
@@ -435,8 +469,12 @@ func (s *downloadService) handleBotDetection(ctx context.Context) {
 			return
 		case <-timer.C:
 			logger.Info().Msg("休息结束，重置 bot detection 计数器")
-			// 重置计数器
-			s.botDetectionCount = 0
+			// 重置计数器（保存到文件）
+			if err := s.fileManager.ResetBotDetectionCount(); err != nil {
+				logger.Warn().Err(err).Msg("重置 bot detection 计数失败")
+			} else {
+				s.botDetectionCount = 0
+			}
 			return
 		}
 	}

@@ -68,13 +68,20 @@ func NewDownloadService(
 	fileManager file.Repository,
 	cfg *config.Config,
 ) DownloadService {
-	return &downloadService{
+	ds := &downloadService{
 		downloader:      downloader,
 		parser:          parser,
 		subtitleManager: subtitleManager,
 		fileManager:     fileManager,
 		cfg:             cfg,
 	}
+
+	// 从文件加载 bot detection 计数
+	if count, err := fileManager.GetBotDetectionCount(); err == nil {
+		ds.botDetectionCount = count
+	}
+
+	return ds
 }
 
 // getChannelLanguages 获取指定频道配置的字幕语言列表

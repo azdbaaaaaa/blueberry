@@ -15,10 +15,11 @@ type uploadCounters struct {
 }
 
 type downloadCounters struct {
-	Date         string `json:"date"`          // 最后更新时间（格式: YYYY-MM-DD HH:MM:SS）
-	Count        int    `json:"count"`         // 当前计数
-	RestUntil    string `json:"rest_until"`    // 休息结束时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
-	RestDuration int    `json:"rest_duration"` // 休息时长（分钟），用于日志
+	Date              string `json:"date"`                // 最后更新时间（格式: YYYY-MM-DD HH:MM:SS）
+	Count             int    `json:"count"`               // 当前下载计数
+	RestUntil         string `json:"rest_until"`          // 休息结束时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
+	RestDuration      int    `json:"rest_duration"`       // 休息时长（分钟），用于日志
+	BotDetectionCount int    `json:"bot_detection_count"` // 机器人检测累计计数
 }
 
 func shortenErrorMessage(msg string) string {
@@ -93,6 +94,10 @@ type Repository interface {
 	ResetTodayDownloadCount() error
 	IsInRestPeriod() (bool, time.Time, error)
 	SetDownloadRestUntil(restUntil time.Time, restDurationMinutes int) error
+	// 机器人检测计数
+	GetBotDetectionCount() (int, error)
+	IncrementBotDetectionCount() error
+	ResetBotDetectionCount() error
 	// 获取视频下载状态（status/downloaded/error）
 	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
 	// 标记是否存在（或已获得）1080p（或更高）的视频
@@ -1345,15 +1350,17 @@ func (r *repository) loadDownloadCountersRaw() (*downloadCounters, error) {
 	if err != nil {
 		// 不存在则初始化
 		return &downloadCounters{
-			Date:  time.Now().Format("2006-01-02 15:04:05"),
-			Count: 0,
+			Date:              time.Now().Format("2006-01-02 15:04:05"),
+			Count:             0,
+			BotDetectionCount: 0,
 		}, nil
 	}
 	var dc downloadCounters
 	if err := json.Unmarshal(data, &dc); err != nil {
 		return &downloadCounters{
-			Date:  time.Now().Format("2006-01-02 15:04:05"),
-			Count: 0,
+			Date:              time.Now().Format("2006-01-02 15:04:05"),
+			Count:             0,
+			BotDetectionCount: 0,
 		}, nil
 	}
 
@@ -1366,11 +1373,11 @@ func (r *repository) loadDownloadCountersRaw() (*downloadCounters, error) {
 				// 还在休息期间，保持计数
 				return &dc, nil
 			} else {
-				// 休息时间已过，重置计数
-				dc = downloadCounters{
-					Date:  time.Now().Format("2006-01-02 15:04:05"),
-					Count: 0,
-				}
+				// 休息时间已过，重置下载计数（但保留 bot detection 计数）
+				dc.Count = 0
+				dc.RestUntil = ""
+				dc.RestDuration = 0
+				dc.Date = time.Now().Format("2006-01-02 15:04:05")
 				// 保存重置后的状态
 				_ = r.saveDownloadCountersRaw(&dc)
 			}
@@ -1438,6 +1445,35 @@ func (r *repository) ResetTodayDownloadCount() error {
 	dc.Date = time.Now().Format("2006-01-02 15:04:05")
 	dc.RestUntil = "" // 清除休息时间
 	dc.RestDuration = 0
+	return r.saveDownloadCountersRaw(dc)
+}
+
+// GetBotDetectionCount 获取机器人检测计数
+func (r *repository) GetBotDetectionCount() (int, error) {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return 0, err
+	}
+	return dc.BotDetectionCount, nil
+}
+
+// IncrementBotDetectionCount 增加机器人检测计数
+func (r *repository) IncrementBotDetectionCount() error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.BotDetectionCount++
+	return r.saveDownloadCountersRaw(dc)
+}
+
+// ResetBotDetectionCount 重置机器人检测计数
+func (r *repository) ResetBotDetectionCount() error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.BotDetectionCount = 0
 	return r.saveDownloadCountersRaw(dc)
 }
 

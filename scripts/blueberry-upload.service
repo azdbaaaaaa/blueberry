@@ -9,8 +9,8 @@ WorkingDirectory=/opt/blueberry
 ExecStart=/opt/blueberry/blueberry upload --all --watch --config /opt/blueberry/config.yaml
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/blueberry/upload.log
+StandardError=append:/var/log/blueberry/upload.error.log
 
 # 资源限制
 LimitNOFILE=65536

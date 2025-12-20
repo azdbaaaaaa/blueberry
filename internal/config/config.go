@@ -98,9 +98,12 @@ type YouTubeConfig struct {
 	FileAccessRetries int `mapstructure:"file_access_retries"`
 	// VideoLimitBeforeRest 成功下载多少个视频后休息（默认 60，0 表示不限制）
 	VideoLimitBeforeRest int `mapstructure:"video_limit_before_rest"`
-	// RestDurationMin 休息时长范围（分钟），默认 7-8 小时（420-480分钟）
-	RestDurationMin int `mapstructure:"rest_duration_min"` // 最小休息时长（分钟）
-	RestDurationMax int `mapstructure:"rest_duration_max"` // 最大休息时长（分钟）
+	// VideoLimitRestDuration 休息时长（分钟），默认 2 小时（120分钟），实际休息时间会在此基础上随机增加 0-10%
+	VideoLimitRestDuration int `mapstructure:"video_limit_rest_duration"`
+	// BotDetectionThreshold 机器人检测累计多少次后触发休息（默认 10 次）
+	BotDetectionThreshold int `mapstructure:"bot_detection_threshold"`
+	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 1 小时（60分钟），实际休息时间会在此基础上随机增加 0-10%
+	BotDetectionRestDuration int `mapstructure:"bot_detection_rest_duration"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
 	OffsetOverride int `mapstructure:"-"`
@@ -163,8 +166,9 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.buffer_size", "1M")
 	viper.SetDefault("youtube.file_access_retries", 5)
 	viper.SetDefault("youtube.video_limit_before_rest", 60)
-	viper.SetDefault("youtube.rest_duration_min", 420) // 7小时 = 420分钟
-	viper.SetDefault("youtube.rest_duration_max", 480) // 8小时 = 480分钟
+	viper.SetDefault("youtube.video_limit_rest_duration", 120)  // 2小时 = 120分钟，实际休息时间会在此基础上随机增加 0-10%
+	viper.SetDefault("youtube.bot_detection_threshold", 10)     // 机器人检测累计10次后触发休息
+	viper.SetDefault("youtube.bot_detection_rest_duration", 60) // 1小时 = 60分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("output.directory", "./downloads")
 	viper.SetDefault("output.subtitle_archive", "./output")
 

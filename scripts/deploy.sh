@@ -110,9 +110,10 @@ install_service() {
         exit 1
     fi
     
-    # 步骤 1: 创建远程项目目录
-    log_info "步骤 1/5: 创建远程项目目录..."
+    # 步骤 1: 创建远程项目目录和日志目录
+    log_info "步骤 1/5: 创建远程项目目录和日志目录..."
     remote_exec "mkdir -p $REMOTE_DIR && chmod 755 $REMOTE_DIR"
+    remote_exec "mkdir -p /var/log/blueberry && chmod 755 /var/log/blueberry"
     
     # 步骤 2: 本地编译
     log_info "步骤 2/5: 本地编译..."
@@ -154,8 +155,8 @@ install_service() {
     remote_copy "$SCRIPT_DIR/" "$REMOTE_HOST:$REMOTE_DIR/scripts/"
     remote_exec "chmod +x $REMOTE_DIR/scripts/*.sh 2>/dev/null || true"
     
-    # 步骤 4: 安装 systemd 服务
-    log_info "步骤 4/5: 安装 systemd 服务..."
+    # 步骤 4: 复制 systemd 服务
+    log_info "步骤 4/5: 复制 systemd 服务..."
     remote_copy "$SCRIPT_DIR/blueberry-download.service" "$REMOTE_HOST:/etc/systemd/system/"
     remote_copy "$SCRIPT_DIR/blueberry-upload.service" "$REMOTE_HOST:/etc/systemd/system/"
     
@@ -254,17 +255,24 @@ disable_service() {
 logs_service() {
     case $SERVICE_TYPE in
         download)
-            remote_exec "journalctl -u ${SERVICE_PREFIX}-download.service -n 50 --no-pager"
+            log_info "查看下载服务日志（按 Ctrl+C 退出）..."
+            log_info "标准输出: /var/log/blueberry/download.log"
+            log_info "错误输出: /var/log/blueberry/download.error.log"
+            remote_exec "tail -f /var/log/blueberry/download.log /var/log/blueberry/download.error.log"
             ;;
         upload)
-            remote_exec "journalctl -u ${SERVICE_PREFIX}-upload.service -n 50 --no-pager"
+            log_info "查看上传服务日志（按 Ctrl+C 退出）..."
+            log_info "标准输出: /var/log/blueberry/upload.log"
+            log_info "错误输出: /var/log/blueberry/upload.error.log"
+            remote_exec "tail -f /var/log/blueberry/upload.log /var/log/blueberry/upload.error.log"
             ;;
         both)
-            log_info "下载服务日志:"
-            remote_exec "journalctl -u ${SERVICE_PREFIX}-download.service -n 50 --no-pager"
-            echo ""
-            log_info "上传服务日志:"
-            remote_exec "journalctl -u ${SERVICE_PREFIX}-upload.service -n 50 --no-pager"
+            log_info "同时追踪下载和上传服务日志（按 Ctrl+C 退出）..."
+            log_info "下载服务 - 标准输出: /var/log/blueberry/download.log"
+            log_info "下载服务 - 错误输出: /var/log/blueberry/download.error.log"
+            log_info "上传服务 - 标准输出: /var/log/blueberry/upload.log"
+            log_info "上传服务 - 错误输出: /var/log/blueberry/upload.error.log"
+            remote_exec "tail -f /var/log/blueberry/download.log /var/log/blueberry/download.error.log /var/log/blueberry/upload.log /var/log/blueberry/upload.error.log"
             ;;
     esac
 }
