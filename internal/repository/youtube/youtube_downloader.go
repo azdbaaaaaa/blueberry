@@ -147,24 +147,31 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		lastErr = err
 		lastOutput = outputStr
 
-		// 检查是否是认证错误（bot detection）
-		if strings.Contains(outputStr, "Sign in to confirm you're not a bot") ||
-			strings.Contains(outputStr, "confirm you're not a bot") ||
-			strings.Contains(outputStr, "authentication") {
-			// 不立即中止，尝试下一种策略
-			logger.Warn().
-				Int("strategy_index", i+1).
-				Str("client", t.client).
-				Bool("with_cookies", t.includeCookie).
-				Msg("检测到 bot detection，继续尝试下一种策略")
-			continue
-		}
-
 		// 获取退出码（若可用）
 		exitCode := -1
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState != nil {
 			exitCode = ee.ProcessState.ExitCode()
 		}
+
+		// 检查是否是认证错误（bot detection）
+		isBotDetection := strings.Contains(outputStr, "Sign in to confirm you're not a bot") ||
+			strings.Contains(outputStr, "confirm you're not a bot") ||
+			strings.Contains(outputStr, "authentication")
+
+		if isBotDetection {
+			// 不立即中止，尝试下一种策略，但先打印详细错误信息
+			logger.Warn().
+				Int("strategy_index", i+1).
+				Str("client", t.client).
+				Bool("with_cookies", t.includeCookie).
+				Int("exit_code", exitCode).
+				Str("output_preview", previewForLog(outputStr, 800)).
+				Err(err).
+				Msg("下载失败（检测到 bot detection），继续尝试下一种策略")
+			continue
+		}
+
+		// 其他错误，打印详细错误信息
 		logger.Warn().
 			Int("strategy_index", i+1).
 			Str("client", t.client).
