@@ -78,6 +78,8 @@ type YouTubeConfig struct {
 	MinHeight int `mapstructure:"min_height"`
 	// DisableAndroidFallback web 下载失败时，是否禁用回退到 android 客户端；默认 true（不回退，降低风控风险）
 	DisableAndroidFallback bool `mapstructure:"disable_android_fallback"`
+	// ForceIPv6 是否强制使用 IPv6；默认 true（启用 IPv6）
+	ForceIPv6 bool `mapstructure:"force_ipv6"`
 	// Retries yt-dlp --retries
 	Retries int `mapstructure:"retries"`
 	// FragmentRetries yt-dlp --fragment-retries
@@ -156,13 +158,14 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.force_download_undownloadable", true)
 	viper.SetDefault("youtube.min_height", 1080)
 	viper.SetDefault("youtube.disable_android_fallback", true)
+	viper.SetDefault("youtube.force_ipv6", true) // 默认启用 IPv6
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
 	viper.SetDefault("youtube.concurrent_fragments", 1)
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
-	viper.SetDefault("youtube.limit_rate", "20M")
+	viper.SetDefault("youtube.limit_rate", "10M")
 	viper.SetDefault("youtube.buffer_size", "1M")
 	viper.SetDefault("youtube.file_access_retries", 5)
 	viper.SetDefault("youtube.video_limit_before_rest", 60)

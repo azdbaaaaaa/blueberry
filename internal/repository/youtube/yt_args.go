@@ -77,16 +77,25 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 }
 
 // BuildYtDlpBaseArgs builds common, non-dynamic args (output template, ipv6, thumbnails, info json, description).
-func BuildYtDlpBaseArgs(videoDir string) []string {
-	return []string{
+func BuildYtDlpBaseArgs(videoDir string, cfg *config.Config) []string {
+	if cfg == nil {
+		cfg = config.Get()
+	}
+	args := []string{
 		"-o", filepath.Join(videoDir, "%(id)s_%(height)sp.%(ext)s"),
-		"--force-ipv6",
 		"--write-thumbnail",
 		"--convert-thumbnails", "jpg",
 		"--embed-thumbnail",
 		"--write-info-json",
 		"--write-description",
 	}
+	// 根据配置决定使用 IPv6 还是 IPv4
+	if cfg != nil && cfg.YouTube.ForceIPv6 {
+		args = append(args, "--force-ipv6")
+	} else {
+		args = append(args, "--force-ipv4")
+	}
+	return args
 }
 
 // BuildYtDlpCookiesArgs builds cookies-related args depending on availability and inclusion flag.

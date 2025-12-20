@@ -255,7 +255,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
 	args := []string{}
-	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
+	args = append(args, BuildYtDlpBaseArgs(videoDir, config.Get())...)
 
 	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// 如存在 Node，声明 JS runtime，提升兼容性
@@ -309,9 +309,14 @@ func (d *downloader) buildDownloadArgs(videoDir, videoURL string, languages []st
 func (d *downloader) choosePlayerClient(ctx context.Context, videoURL string) (string, string, error) {
 	candidates := []string{"android", "web"}
 	var lastOut string
+	cfg := config.Get()
+	ipv6Flag := "--force-ipv4"
+	if cfg != nil && cfg.YouTube.ForceIPv6 {
+		ipv6Flag = "--force-ipv6"
+	}
 	for _, client := range candidates {
 		args := []string{
-			"--force-ipv6",
+			ipv6Flag,
 			"--list-formats",
 			"--extractor-args", fmt.Sprintf("youtube:player_client=%s", client),
 		}
@@ -400,7 +405,7 @@ func (d *downloader) markHas1080p(videoDir string, videoPath string) error {
 // buildMinimalArgs 构建最小化的下载参数（用于失败兜底重试）
 func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []string, minHeight int, includeCookies bool) []string {
 	args := []string{}
-	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
+	args = append(args, BuildYtDlpBaseArgs(videoDir, config.Get())...)
 	if includeCookies {
 		cookiesPath := d.cookiesFile
 		if cookiesPath != "" && !filepath.IsAbs(cookiesPath) {
@@ -422,7 +427,7 @@ func (d *downloader) buildMinimalArgs(videoDir, videoURL string, languages []str
 // buildBestArgs 构建使用 bestvideo+bestaudio/best 的下载参数（最小化 headers）
 func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string) []string {
 	args := []string{}
-	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
+	args = append(args, BuildYtDlpBaseArgs(videoDir, config.Get())...)
 	args = append(args, BuildYtDlpSubtitleArgs(languages)...)
 	args = append(args, BuildYtDlpStabilityArgs(config.Get())...)
 	args = append(args, BuildYtDlpFormatArgsBest1080()...)
@@ -433,7 +438,7 @@ func (d *downloader) buildBestArgs(videoDir, videoURL string, languages []string
 // buildBestArgsWithClient best 格式下载，按 client/是否带 cookies 构建 UA/headers
 func (d *downloader) buildBestArgsWithClient(videoDir, videoURL string, languages []string, playerClient string, includeCookies bool) []string {
 	args := []string{}
-	args = append(args, BuildYtDlpBaseArgs(videoDir)...)
+	args = append(args, BuildYtDlpBaseArgs(videoDir, config.Get())...)
 	// 不设置 UA/Referer/额外 headers，使用默认行为
 	// cookies
 	if includeCookies {
