@@ -141,17 +141,21 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 	}
 
 	// 在检查视频/图片等文件之前，检查下载状态是否完成
-	if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-		if status != "completed" || !downloaded {
-			logger.Warn().
-				Str("video_dir", videoDir).
-				Str("status", status).
-				Bool("downloaded", downloaded).
-				Msg("视频下载未完成，跳过上传（稍后重试）")
-			return nil
-		}
-	} else {
-		logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取下载状态失败，继续后续检查")
+	status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir)
+	if err != nil {
+		logger.Warn().
+			Err(err).
+			Str("video_dir", videoDir).
+			Msg("读取下载状态失败，跳过上传（下载状态文件不存在或无法读取）")
+		return nil
+	}
+	if status != "completed" || !downloaded {
+		logger.Warn().
+			Str("video_dir", videoDir).
+			Str("status", status).
+			Bool("downloaded", downloaded).
+			Msg("视频下载未完成，跳过上传（稍后重试）")
+		return nil
 	}
 
 	allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
@@ -360,17 +364,22 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 		}
 
 		// 在检查视频/图片等文件之前，检查下载状态是否完成
-		if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if status != "completed" || !downloaded {
-				logger.Warn().
-					Str("video_id", videoID).
-					Str("status", status).
-					Bool("downloaded", downloaded).
-					Msg("视频下载未完成，跳过上传（稍后重试）")
-				continue
-			}
-		} else {
-			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，继续后续检查")
+		status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir)
+		if err != nil {
+			logger.Warn().
+				Err(err).
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Msg("读取下载状态失败，跳过上传（下载状态文件不存在或无法读取）")
+			continue
+		}
+		if status != "completed" || !downloaded {
+			logger.Warn().
+				Str("video_id", videoID).
+				Str("status", status).
+				Bool("downloaded", downloaded).
+				Msg("视频下载未完成，跳过上传（稍后重试）")
+			continue
 		}
 
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
@@ -575,17 +584,22 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 		}
 
 		// 在检查视频/图片等文件之前，检查下载状态是否完成
-		if status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir); err == nil {
-			if status != "completed" || !downloaded {
-				logger.Warn().
-					Str("video_id", videoID).
-					Str("status", status).
-					Bool("downloaded", downloaded).
-					Msg("视频下载未完成，跳过上传（稍后重试）")
-				continue
-			}
-		} else {
-			logger.Warn().Err(err).Str("video_id", videoID).Msg("读取下载状态失败，继续后续检查")
+		status, downloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir)
+		if err != nil {
+			logger.Warn().
+				Err(err).
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Msg("读取下载状态失败，跳过上传（下载状态文件不存在或无法读取）")
+			continue
+		}
+		if status != "completed" || !downloaded {
+			logger.Warn().
+				Str("video_id", videoID).
+				Str("status", status).
+				Bool("downloaded", downloaded).
+				Msg("视频下载未完成，跳过上传（稍后重试）")
+			continue
 		}
 
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
