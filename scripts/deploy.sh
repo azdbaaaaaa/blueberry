@@ -14,6 +14,20 @@ BIN_NAME="blueberry"
 BIN_DIR="$PROJECT_DIR/bin"
 BIN="$BIN_DIR/$BIN_NAME"
 
+# 默认 IP 列表（如果未提供 IP 参数，将使用此列表）
+# 可以通过环境变量 DEPLOY_DEFAULT_IPS 覆盖，格式：IP1 IP2 IP3
+DEFAULT_IPS=(
+    # 在这里添加默认的服务器 IP
+    "46.250.231.34"
+    "194.233.83.29"
+    "84.247.145.180"
+)
+
+# 如果设置了环境变量，使用环境变量的值
+if [ -n "$DEPLOY_DEFAULT_IPS" ]; then
+    read -ra DEFAULT_IPS <<< "$DEPLOY_DEFAULT_IPS"
+fi
+
 # 颜色输出
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -27,9 +41,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_ip() { echo -e "${BLUE}[$1]${NC} $2"; }
 
 # 检查参数
-if [ $# -lt 2 ]; then
+if [ $# -lt 1 ]; then
     log_error "参数不足"
-    echo "用法: $0 <action> <ip1> [ip2] [ip3] ... [service_type] [--init]"
+    echo "用法: $0 <action> [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
     echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -46,12 +60,18 @@ if [ $# -lt 2 ]; then
     echo ""
     echo "Service types: download, upload, both (默认: both)"
     echo ""
+    echo "IP 参数:"
+    echo "  - 如果未提供 IP，将使用脚本中配置的默认 IP 列表"
+    echo "  - 可以通过环境变量 DEPLOY_DEFAULT_IPS 覆盖默认列表"
+    echo ""
     echo "示例:"
     echo "  $0 prepare 66.42.63.131"
-    echo "  $0 install 66.42.63.131 194.233.83.29"
-    echo "  $0 install 66.42.63.131 --init"
+    echo "  $0 install 66.42.63.131,194.233.83.29"
+    echo "  $0 install 66.42.63.131,194.233.83.29,46.250.231.34 --init"
     echo "  $0 start 66.42.63.131 download"
-    echo "  $0 restart 66.42.63.131 194.233.83.29 upload"
+    echo "  $0 restart 66.42.63.131,194.233.83.29 upload"
+    echo "  $0 start  # 使用默认 IP 列表"
+    echo "  DEPLOY_DEFAULT_IPS='66.42.63.131 194.233.83.29' $0 start"
     exit 1
 fi
 
@@ -62,6 +82,33 @@ shift  # 移除 ACTION
 IPS=()
 INIT_AFTER_INSTALL=false
 SERVICE_TYPE="both"
+
+# 解析单个 IP 或逗号分隔的 IP 列表
+parse_ips() {
+    local input=$1
+    # 如果包含逗号，按逗号分割
+    if [[ $input == *","* ]]; then
+        IFS=',' read -ra IP_ARRAY <<< "$input"
+        for ip in "${IP_ARRAY[@]}"; do
+            ip=$(echo "$ip" | xargs)  # 去除首尾空格
+            if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                IPS+=("$ip")
+            else
+                log_error "无效的 IP 地址: $ip"
+                return 1
+            fi
+        done
+    else
+        # 单个 IP
+        if [[ $input =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            IPS+=("$input")
+        else
+            log_error "无效的 IP 地址: $input"
+            return 1
+        fi
+    fi
+    return 0
+}
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -74,11 +121,8 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            # 验证 IP 格式
-            if [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                IPS+=("$1")
-            else
-                log_error "无效的 IP 地址: $1"
+            # 解析 IP（支持逗号分隔或单个 IP）
+            if ! parse_ips "$1"; then
                 exit 1
             fi
             shift
@@ -86,10 +130,15 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 检查是否有 IP
+# 如果没有提供 IP，使用默认 IP 列表
 if [ ${#IPS[@]} -eq 0 ]; then
-    log_error "未提供有效的 IP 地址"
-    exit 1
+    if [ ${#DEFAULT_IPS[@]} -eq 0 ]; then
+        log_error "未提供 IP 地址，且未配置默认 IP 列表"
+        log_error "请在脚本中配置 DEFAULT_IPS 或通过环境变量 DEPLOY_DEFAULT_IPS 设置"
+        exit 1
+    fi
+    log_info "使用默认 IP 列表: ${DEFAULT_IPS[*]}"
+    IPS=("${DEFAULT_IPS[@]}")
 fi
 
 # 验证 IP 格式的函数
