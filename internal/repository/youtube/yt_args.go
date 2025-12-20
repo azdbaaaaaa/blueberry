@@ -20,8 +20,8 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	}
 	retries := 3
 	fragmentRetries := 3
-	concurrentFragments := 5
-	sleepInterval := 60
+	concurrentFragments := 3 // 默认值 3（与 config.go 中的默认值保持一致）
+	sleepInterval := 30      // 默认值 30 秒（与 config.go 中的默认值保持一致）
 	sleepRequests := 3
 	sleepSubtitles := 2
 	bufferSize := "1M"

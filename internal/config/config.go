@@ -161,7 +161,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
 	viper.SetDefault("youtube.concurrent_fragments", 3)
-	viper.SetDefault("youtube.sleep_interval_seconds", 60)
+	viper.SetDefault("youtube.sleep_interval_seconds", 30)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
 	viper.SetDefault("youtube.limit_rate", "10M")
@@ -210,6 +210,12 @@ func Load(configPath string) (*Config, error) {
 	}
 	if config.YouTube.BotDetectionRestDuration == 0 {
 		config.YouTube.BotDetectionRestDuration = 480 // 使用默认值
+	}
+	if config.YouTube.SleepIntervalSeconds == 0 {
+		config.YouTube.SleepIntervalSeconds = 30 // 使用默认值
+	}
+	if config.YouTube.ConcurrentFragments == 0 {
+		config.YouTube.ConcurrentFragments = 3 // 使用默认值
 	}
 
 	if err := validate(&config); err != nil {

@@ -401,24 +401,20 @@ process_all_ips() {
     
     # 对于 install 操作，先编译一次（所有服务器共享）
     if [ "$action" = "install" ]; then
-        if [ ! -f "$BIN" ]; then
-            log_info "本地编译（所有服务器共享）..."
-            if ! command -v go >/dev/null 2>&1; then
-                log_error "Go 未安装，无法编译。请先安装 Go 或使用已编译的二进制文件。"
-                exit 1
-            fi
-            
-            cd "$PROJECT_DIR"
-            log_info "编译中..."
-            GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$BIN" .
-            if [ ! -f "$BIN" ]; then
-                log_error "编译失败，二进制文件不存在: $BIN"
-                exit 1
-            fi
-            log_info "编译完成: $BIN"
-        else
-            log_info "使用已编译的二进制文件: $BIN"
+        log_info "本地编译（所有服务器共享）..."
+        if ! command -v go >/dev/null 2>&1; then
+            log_error "Go 未安装，无法编译。请先安装 Go 或使用已编译的二进制文件。"
+            exit 1
         fi
+        
+        cd "$PROJECT_DIR"
+        log_info "编译中..."
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$BIN" .
+        if [ ! -f "$BIN" ]; then
+            log_error "编译失败，二进制文件不存在: $BIN"
+            exit 1
+        fi
+        log_info "编译完成: $BIN"
         echo ""
     fi
     
