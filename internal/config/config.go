@@ -97,7 +97,7 @@ type YouTubeConfig struct {
 	BufferSize string `mapstructure:"buffer_size"`
 	// FileAccessRetries yt-dlp --file-access-retries（文件访问重试次数）
 	FileAccessRetries int `mapstructure:"file_access_retries"`
-	// VideoLimitBeforeRest 成功下载多少个视频后休息（默认 10，0 表示不限制）
+	// VideoLimitBeforeRest 成功下载多少个视频后休息（默认 40，0 表示不限制）
 	VideoLimitBeforeRest int `mapstructure:"video_limit_before_rest"`
 	// VideoLimitRestDuration 休息时长（分钟），默认 1 小时（60分钟），实际休息时间会在此基础上随机增加 0-10%
 	VideoLimitRestDuration int `mapstructure:"video_limit_rest_duration"`
@@ -160,14 +160,14 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.force_ipv6", true) // 默认启用 IPv6
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
-	viper.SetDefault("youtube.concurrent_fragments", 1)
+	viper.SetDefault("youtube.concurrent_fragments", 3)
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
 	viper.SetDefault("youtube.limit_rate", "10M")
 	viper.SetDefault("youtube.buffer_size", "1M")
 	viper.SetDefault("youtube.file_access_retries", 5)
-	viper.SetDefault("youtube.video_limit_before_rest", 10)
+	viper.SetDefault("youtube.video_limit_before_rest", 40)
 	viper.SetDefault("youtube.video_limit_rest_duration", 60)    // 1小时 = 60分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("youtube.bot_detection_threshold", 10)      // 机器人检测累计10次后触发休息
 	viper.SetDefault("youtube.bot_detection_rest_duration", 480) // 8小时 = 480分钟，实际休息时间会在此基础上随机增加 0-10%

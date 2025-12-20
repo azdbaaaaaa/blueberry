@@ -243,6 +243,21 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 			videoMap["availability"] = video.Availability
 		}
 
+		// 提取文件大小（如果 RawData 中存在）
+		// yt-dlp 可能返回 filesize 或 filesize_approx
+		if video.RawData != nil {
+			// 优先使用 filesize，如果没有则使用 filesize_approx
+			if filesize, ok := video.RawData["filesize"].(float64); ok && filesize > 0 {
+				videoMap["filesize"] = int64(filesize)
+			} else if filesizeApprox, ok := video.RawData["filesize_approx"].(float64); ok && filesizeApprox > 0 {
+				videoMap["filesize"] = int64(filesizeApprox)
+			} else if filesizeInt, ok := video.RawData["filesize"].(int64); ok && filesizeInt > 0 {
+				videoMap["filesize"] = filesizeInt
+			} else if filesizeApproxInt, ok := video.RawData["filesize_approx"].(int64); ok && filesizeApproxInt > 0 {
+				videoMap["filesize"] = filesizeApproxInt
+			}
+		}
+
 		// 为每个视频创建目录（使用视频ID作为目录名）
 		videoID, _ := videoMap["id"].(string)
 		if videoID == "" {

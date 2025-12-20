@@ -79,7 +79,7 @@ type Repository interface {
 	// 上传状态管理
 	IsVideoUploaded(videoDir string) bool
 	MarkVideoUploading(videoDir string) error
-	MarkVideoUploaded(videoDir string, bilibiliAID string, bilibiliAccount string, bilibiliUserID string) error
+	MarkVideoUploaded(videoDir string, bilibiliAID string, bilibiliAccount string, bilibiliUserID string, fileSize int64) error
 	MarkVideoUploadFailed(videoDir string, errorMsg string) error
 	FindCoverFile(videoDir string) (string, error)
 	// 从 download_status.json 中提取字幕语言列表
@@ -1157,7 +1157,7 @@ func (r *repository) MarkVideoUploading(videoDir string) error {
 }
 
 // MarkVideoUploaded 标记视频上传完成
-func (r *repository) MarkVideoUploaded(videoDir string, bilibiliAID string, bilibiliAccount string, bilibiliUserID string) error {
+func (r *repository) MarkVideoUploaded(videoDir string, bilibiliAID string, bilibiliAccount string, bilibiliUserID string, fileSize int64) error {
 	return r.updateUploadStatus(videoDir, func(status map[string]interface{}) {
 		status["status"] = "completed"
 		status["uploaded"] = true
@@ -1167,6 +1167,9 @@ func (r *repository) MarkVideoUploaded(videoDir string, bilibiliAID string, bili
 		}
 		if bilibiliUserID != "" {
 			status["bilibili_userid"] = bilibiliUserID
+		}
+		if fileSize > 0 {
+			status["file_size"] = fileSize
 		}
 		status["completed_at"] = time.Now().Unix()
 		// 清除错误信息
