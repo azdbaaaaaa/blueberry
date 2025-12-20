@@ -146,9 +146,18 @@ if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
     exit 0
 fi
 
+# 检查 channel_info.json 是否存在
+CHANNEL_INFO_FILE="$CHANNEL_PATH/channel_info.json"
+HAS_CHANNEL_INFO=false
+if [ -f "$CHANNEL_INFO_FILE" ]; then
+    HAS_CHANNEL_INFO=true
+    echo -e "${GREEN}找到 channel_info.json，将同步更新${NC}"
+fi
+
 # 执行删除
 DELETED=0
 FAILED=0
+DELETED_VIDEO_IDS=()
 
 echo ""
 echo -e "${YELLOW}开始删除...${NC}"
@@ -168,6 +177,7 @@ if [ $START_INDEX -gt 0 ]; then
         if rm -rf "$dir" 2>&1; then
             echo -e "${GREEN}✓ 已删除: $dirname${NC}"
             ((DELETED++))
+            DELETED_VIDEO_IDS+=("$dirname")
         else
             echo -e "${RED}✗ 删除失败: $dirname${NC}"
             ((FAILED++))
@@ -192,6 +202,7 @@ if [ $END_INDEX -lt $((TOTAL_COUNT - 1)) ]; then
         if rm -rf "$dir" 2>&1; then
             echo -e "${GREEN}✓ 已删除: $dirname${NC}"
             ((DELETED++))
+            DELETED_VIDEO_IDS+=("$dirname")
         else
             echo -e "${RED}✗ 删除失败: $dirname${NC}"
             ((FAILED++))
@@ -199,6 +210,65 @@ if [ $END_INDEX -lt $((TOTAL_COUNT - 1)) ]; then
     done
 else
     echo -e "${YELLOW}[DEBUG] 无需删除 offset+limit 之后的文件夹（END_INDEX=$END_INDEX, TOTAL_COUNT=$TOTAL_COUNT）${NC}"
+fi
+
+# 更新 channel_info.json（如果存在）
+if [ "$HAS_CHANNEL_INFO" = true ] && [ ${#DELETED_VIDEO_IDS[@]} -gt 0 ]; then
+    echo ""
+    echo -e "${YELLOW}更新 channel_info.json...${NC}"
+    
+    # 检查是否有 python3 或 jq 可用
+    if command -v python3 >/dev/null 2>&1; then
+        # 使用 Python 更新 JSON
+        # 将删除的 video_id 列表转换为 JSON 数组并传递给 Python
+        DELETED_IDS_JSON=$(printf '%s\n' "${DELETED_VIDEO_IDS[@]}" | python3 -c "import sys, json; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))")
+        
+        python3 <<PYTHON_SCRIPT
+import json
+import sys
+
+try:
+    with open("$CHANNEL_INFO_FILE", 'r', encoding='utf-8') as f:
+        videos = json.load(f)
+    
+    deleted_ids = json.loads('$DELETED_IDS_JSON')
+    deleted_set = set(deleted_ids)
+    
+    original_count = len(videos)
+    videos = [v for v in videos if v.get('id', '') not in deleted_set]
+    new_count = len(videos)
+    
+    with open("$CHANNEL_INFO_FILE", 'w', encoding='utf-8') as f:
+        json.dump(videos, f, ensure_ascii=False, indent=2)
+    
+    print(f"✓ 已从 channel_info.json 删除 {original_count - new_count} 个条目")
+    print(f"  原始条目数: {original_count}")
+    print(f"  更新后条目数: {new_count}")
+except Exception as e:
+    print(f"✗ 更新 channel_info.json 失败: {e}", file=sys.stderr)
+    sys.exit(1)
+PYTHON_SCRIPT
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}channel_info.json 更新成功${NC}"
+        else
+            echo -e "${RED}channel_info.json 更新失败${NC}"
+        fi
+    elif command -v jq >/dev/null 2>&1; then
+        # 使用 jq 更新 JSON
+        TEMP_FILE=$(mktemp)
+        jq_input="$CHANNEL_INFO_FILE"
+        for video_id in "${DELETED_VIDEO_IDS[@]}"; do
+            jq "map(select(.id != \"$video_id\"))" "$jq_input" > "$TEMP_FILE" && mv "$TEMP_FILE" "$jq_input"
+        done
+        rm -f "$TEMP_FILE"
+        echo -e "${GREEN}channel_info.json 更新成功（使用 jq）${NC}"
+    else
+        echo -e "${YELLOW}警告: 未找到 python3 或 jq，无法更新 channel_info.json${NC}"
+        echo -e "${YELLOW}请手动从 channel_info.json 中删除以下 video_id:${NC}"
+        for video_id in "${DELETED_VIDEO_IDS[@]}"; do
+            echo "  - $video_id"
+        done
+    fi
 fi
 
 # 显示结果

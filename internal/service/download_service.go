@@ -124,18 +124,64 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 
 	logger.Info().Int("count", len(videos)).Msg("找到视频")
 
+	// 应用 limit 和 offset（命令行覆盖配置）
+	offset := channel.Offset
+	limit := channel.Limit
+	if s.cfg.YouTube.OffsetOverride != 0 || s.cfg.YouTube.LimitOverride != 0 {
+		if s.cfg.YouTube.OffsetOverride >= 0 {
+			offset = s.cfg.YouTube.OffsetOverride
+		}
+		if s.cfg.YouTube.LimitOverride > 0 {
+			limit = s.cfg.YouTube.LimitOverride
+		}
+		logger.Info().Int("offset", offset).Int("limit", limit).Msg("应用命令行覆盖（parse）")
+	}
+
+	// 根据 offset 和 limit 筛选视频
+	start := offset
+	if start < 0 {
+		start = 0
+	}
+	end := len(videos)
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	if start > len(videos) {
+		start = len(videos)
+	}
+	if start >= end {
+		logger.Warn().
+			Int("offset", offset).
+			Int("limit", limit).
+			Int("total", len(videos)).
+			Msg("offset 和 limit 配置无效，将保存所有视频")
+		start = 0
+		end = len(videos)
+	}
+
+	// 应用筛选
+	selectedVideos := videos[start:end]
+	logger.Info().
+		Int("total_videos", len(videos)).
+		Int("offset", offset).
+		Int("limit", limit).
+		Int("selected_count", len(selectedVideos)).
+		Int("range_start", start).
+		Int("range_end", end).
+		Msg("应用 limit/offset 筛选")
+
 	// 如果新解析的视频数量与已存在的不同，记录日志
-	if existingCount > 0 && len(videos) != existingCount {
+	if existingCount > 0 && len(selectedVideos) != existingCount {
 		logger.Info().
 			Int("existing_count", existingCount).
-			Int("new_count", len(videos)).
+			Int("new_count", len(selectedVideos)).
 			Msg("视频数量发生变化，将更新频道信息")
 	}
 
 	// 从第一个视频中获取真正的频道ID（channel_id），如果没有视频则使用URL提取的ID
 	realChannelID := channelID
-	if len(videos) > 0 {
-		firstVideo := videos[0]
+	if len(selectedVideos) > 0 {
+		firstVideo := selectedVideos[0]
 		if firstVideo.ChannelID != "" {
 			realChannelID = firstVideo.ChannelID
 			logger.Info().
@@ -152,9 +198,9 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 		return err
 	}
 
-	// 将 videos 转换为 []map[string]interface{} 以便保存，并为每个视频创建目录
-	videoMaps := make([]map[string]interface{}, 0, len(videos))
-	for i, video := range videos {
+	// 将 selectedVideos 转换为 []map[string]interface{} 以便保存，并为每个视频创建目录
+	videoMaps := make([]map[string]interface{}, 0, len(selectedVideos))
+	for i, video := range selectedVideos {
 		// 使用 RawData 如果存在，否则手动构建
 		var videoMap map[string]interface{}
 		if video.RawData != nil {
@@ -257,7 +303,7 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 		} else {
 			logger.Debug().
 				Int("index", i+1).
-				Int("total", len(videos)).
+				Int("total", len(selectedVideos)).
 				Str("title", title).
 				Str("video_dir", videoDir).
 				Msg("视频解析信息已保存（未下载）")
@@ -292,8 +338,11 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 
 	logger.Info().
 		Str("channel_id", realChannelID).
-		Int("video_count", len(videos)).
-		Msg("频道信息已保存")
+		Int("total_videos", len(videos)).
+		Int("saved_video_count", len(videoMaps)).
+		Int("offset", offset).
+		Int("limit", limit).
+		Msg("频道信息已保存（已应用 limit/offset）")
 
 	// 可选：生成待下载状态文件（可能较慢）
 	if s.cfg.Channel.GeneratePendingDownloads {
