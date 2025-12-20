@@ -386,16 +386,18 @@ func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *
 			Msg("待下载状态文件已生成/更新")
 	}
 
-	// 初始化每日下载计数器
-	s.resetDailyCounterIfNeeded()
+	// 检查是否在休息期间
+	if inRest, restUntil, err := s.fileManager.IsInRestPeriod(); err == nil && inRest {
+		s.sleepUntilRestEnd(ctx, restUntil)
+		// 休息结束后，计数器已重置，继续下载
+	}
 
 	// 遍历每个视频，逐个下载（不使用并发）
 	for i, videoMap := range videoMaps {
-		// 检查每日下载限制
-		if s.isDailyLimitReached() {
-			sleepUntilNextDay(ctx)
-			// 重置计数器后继续
-			s.resetDailyCounterIfNeeded()
+		// 检查是否达到下载限制（每N个视频后休息）
+		if s.isDownloadLimitReached() {
+			s.restAfterLimit(ctx)
+			// 休息结束后，计数器已重置，继续下载
 		}
 
 		// 从 map 中提取基本信息
@@ -472,7 +474,7 @@ func (s *downloadService) downloadFromChannelInfo(ctx context.Context, channel *
 		// 如果成功下载了新视频，增加计数器
 		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
 		if downloadedAfter && !downloadedBefore {
-			s.incrementDailyCounter()
+			s.incrementDownloadCounter(ctx)
 		}
 	}
 

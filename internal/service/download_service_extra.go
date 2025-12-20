@@ -81,8 +81,29 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 	// 获取频道语言配置
 	languages := s.getChannelLanguages(channel)
 
-	// 初始化每日下载计数器
-	s.resetDailyCounterIfNeeded()
+	// 检查是否在休息期间
+	if inRest, restUntil, err := s.fileManager.IsInRestPeriod(); err == nil {
+		if inRest {
+			logger.Info().
+				Time("rest_until", restUntil).
+				Dur("remaining", time.Until(restUntil)).
+				Msg("检测到正在休息期间，等待休息结束")
+			s.sleepUntilRestEnd(ctx, restUntil)
+			// 休息结束后，计数器已重置，继续下载
+			logger.Info().Msg("休息结束，继续下载")
+		} else {
+			// 加载当前下载计数
+			count, countErr := s.fileManager.GetTodayDownloadCount()
+			if countErr == nil {
+				logger.Info().
+					Int("current_count", count).
+					Int("limit", s.getDownloadLimit()).
+					Msg("开始下载，当前下载计数")
+			}
+		}
+	} else {
+		logger.Warn().Err(err).Msg("检查休息状态失败")
+	}
 
 	// 遍历每个视频，逐个下载
 	for i, videoMap := range videoMaps {
@@ -121,11 +142,15 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 			}
 		}
 
-		// 检查每日下载限制
-		if s.isDailyLimitReached() {
-			sleepUntilNextDay(ctx)
-			// 重置计数器后继续
-			s.resetDailyCounterIfNeeded()
+		// 检查是否达到下载限制（每N个视频后休息）
+		if s.isDownloadLimitReached() {
+			logger.Warn().
+				Int("current_count", s.dailyDownloadCount).
+				Int("limit", s.getDownloadLimit()).
+				Msg("达到下载限制，准备休息")
+			s.restAfterLimit(ctx)
+			// 休息结束后，计数器已重置，继续下载
+			logger.Info().Msg("休息结束，继续下载下一个视频")
 		}
 
 		// 使用统一的下载逻辑
@@ -147,7 +172,7 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 		// 如果成功下载了新视频，增加计数器
 		downloadedAfter := s.fileManager.IsVideoDownloaded(videoDir)
 		if downloadedAfter && !downloadedBefore {
-			s.incrementDailyCounter()
+			s.incrementDownloadCounter(ctx)
 		}
 
 		// 在下载每个视频后添加延迟，避免触发 429 错误
@@ -170,79 +195,200 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 	return nil
 }
 
-// resetDailyCounterIfNeeded 检查日期，如果是新的一天则重置计数器（从文件加载）
-func (s *downloadService) resetDailyCounterIfNeeded() {
-	today := time.Now().Format("2006-01-02")
-	// 从文件加载当前计数
-	count, err := s.fileManager.GetTodayDownloadCount()
-	if err != nil {
-		logger.Warn().Err(err).Msg("加载每日下载计数失败，使用内存计数器")
-		// 如果加载失败，使用内存计数器作为后备
-		if s.dailyDownloadDate != today {
-			s.dailyDownloadCount = 0
-			s.dailyDownloadDate = today
-			logger.Info().
-				Str("date", today).
-				Msg("新的一天，重置每日下载计数器（内存）")
-		}
-		return
-	}
-	// 更新内存计数器
-	s.dailyDownloadCount = count
-	s.dailyDownloadDate = today
-	if count == 0 {
-		logger.Info().
-			Str("date", today).
-			Msg("新的一天，每日下载计数器已重置")
-	}
-}
+// incrementDownloadCounter 增加下载计数器（持久化到文件）
+func (s *downloadService) incrementDownloadCounter(ctx context.Context) {
+	// 先获取当前计数
+	oldCount, _ := s.fileManager.GetTodayDownloadCount()
 
-// incrementDailyCounter 增加每日下载计数器（持久化到文件）
-func (s *downloadService) incrementDailyCounter() {
 	err := s.fileManager.IncrementTodayDownloadCount()
 	if err != nil {
-		logger.Warn().Err(err).Msg("保存每日下载计数失败，使用内存计数器")
-		// 如果保存失败，使用内存计数器作为后备
+		logger.Warn().Err(err).Msg("保存下载计数失败，使用内存计数器")
 		s.dailyDownloadCount++
+		logger.Info().
+			Int("old_count", oldCount).
+			Int("new_count", s.dailyDownloadCount).
+			Int("limit", s.getDownloadLimit()).
+			Msg("下载计数更新（内存计数器）")
 	} else {
-		// 从文件重新加载以确保同步
 		count, loadErr := s.fileManager.GetTodayDownloadCount()
 		if loadErr == nil {
 			s.dailyDownloadCount = count
+			remaining := s.getDownloadLimit() - s.dailyDownloadCount
+			logger.Info().
+				Int("old_count", oldCount).
+				Int("new_count", s.dailyDownloadCount).
+				Int("limit", s.getDownloadLimit()).
+				Int("remaining", remaining).
+				Msg("下载计数更新（已保存到文件）")
 		} else {
 			s.dailyDownloadCount++
+			logger.Warn().Err(loadErr).Msg("加载下载计数失败，使用内存计数器")
+			logger.Info().
+				Int("old_count", oldCount).
+				Int("new_count", s.dailyDownloadCount).
+				Int("limit", s.getDownloadLimit()).
+				Msg("下载计数更新（内存计数器）")
 		}
 	}
-	logger.Info().
-		Int("daily_count", s.dailyDownloadCount).
-		Int("limit", s.getDailyLimit()).
-		Msg("每日下载计数更新")
+
+	// 检查是否达到限制
+	if s.isDownloadLimitReached() {
+		s.restAfterLimit(ctx)
+	}
 }
 
-// isDailyLimitReached 检查是否达到每日下载限制
-func (s *downloadService) isDailyLimitReached() bool {
-	limit := s.getDailyLimit()
+// isDownloadLimitReached 检查是否达到下载限制（每N个视频后休息）
+func (s *downloadService) isDownloadLimitReached() bool {
+	limit := s.getDownloadLimit()
 	if limit <= 0 {
+		logger.Debug().Int("limit", limit).Msg("下载限制已禁用")
 		return false // 0 或负数表示不限制
 	}
 	// 优先从文件加载，确保准确性
 	count, err := s.fileManager.GetTodayDownloadCount()
 	if err != nil {
-		logger.Warn().Err(err).Msg("加载每日下载计数失败，使用内存计数器")
+		logger.Warn().Err(err).Msg("加载下载计数失败，使用内存计数器")
 		// 如果加载失败，使用内存计数器
-		return s.dailyDownloadCount >= limit
+		reached := s.dailyDownloadCount >= limit
+		if reached {
+			logger.Info().
+				Int("count", s.dailyDownloadCount).
+				Int("limit", limit).
+				Msg("达到下载限制（使用内存计数器）")
+		}
+		return reached
 	}
 	// 更新内存计数器
 	s.dailyDownloadCount = count
-	return count >= limit
+	reached := count >= limit
+	if reached {
+		logger.Info().
+			Int("count", count).
+			Int("limit", limit).
+			Msg("达到下载限制（从文件加载）")
+	} else {
+		logger.Debug().
+			Int("count", count).
+			Int("limit", limit).
+			Int("remaining", limit-count).
+			Msg("检查下载限制：未达到")
+	}
+	return reached
 }
 
-// getDailyLimit 获取每日下载限制
-func (s *downloadService) getDailyLimit() int {
-	if s.cfg != nil && s.cfg.YouTube.DailyVideoLimit > 0 {
-		return s.cfg.YouTube.DailyVideoLimit
+// getDownloadLimit 获取下载限制（每N个视频后休息）
+func (s *downloadService) getDownloadLimit() int {
+	if s.cfg != nil && s.cfg.YouTube.VideoLimitBeforeRest > 0 {
+		return s.cfg.YouTube.VideoLimitBeforeRest
 	}
-	return 80 // 默认值
+	return 60 // 默认值
+}
+
+// restAfterLimit 达到限制后休息7-8小时
+func (s *downloadService) restAfterLimit(ctx context.Context) {
+	// 获取休息时长配置
+	restMin := 420 // 默认7小时 = 420分钟
+	restMax := 480 // 默认8小时 = 480分钟
+	if s.cfg != nil {
+		if s.cfg.YouTube.RestDurationMin > 0 {
+			restMin = s.cfg.YouTube.RestDurationMin
+		}
+		if s.cfg.YouTube.RestDurationMax > 0 {
+			restMax = s.cfg.YouTube.RestDurationMax
+		}
+	}
+
+	// 生成随机休息时间（分钟）
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	restMinutes := restMin + rng.Intn(restMax-restMin+1)
+	restDuration := time.Duration(restMinutes) * time.Minute
+	restUntil := time.Now().Add(restDuration)
+
+	logger.Warn().
+		Int("download_count", s.dailyDownloadCount).
+		Int("limit", s.getDownloadLimit()).
+		Dur("rest_duration", restDuration).
+		Int("rest_minutes", restMinutes).
+		Time("rest_until", restUntil).
+		Msg("达到下载限制，开始休息")
+
+	// 保存休息时间到文件
+	if err := s.fileManager.SetDownloadRestUntil(restUntil, restMinutes); err != nil {
+		logger.Warn().Err(err).Msg("保存休息时间失败")
+	} else {
+		logger.Info().
+			Time("rest_until", restUntil).
+			Int("rest_minutes", restMinutes).
+			Msg("休息时间已保存到文件")
+	}
+
+	// 休息
+	timer := time.NewTimer(restDuration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		logger.Info().Msg("休息被取消")
+		return
+	case <-timer.C:
+		// 验证计数器已重置
+		count, countErr := s.fileManager.GetTodayDownloadCount()
+		if countErr == nil {
+			logger.Info().
+				Int("reset_count", count).
+				Msg("休息结束，下载计数器已重置，继续下载")
+		} else {
+			logger.Info().Err(countErr).Msg("休息结束，继续下载")
+		}
+		// 计数器已在 SetDownloadRestUntil 中重置
+		return
+	}
+}
+
+// sleepUntilRestEnd 休眠到休息结束时间
+func (s *downloadService) sleepUntilRestEnd(ctx context.Context, restUntil time.Time) {
+	duration := time.Until(restUntil)
+	if duration <= 0 {
+		logger.Info().
+			Time("rest_until", restUntil).
+			Msg("休息时间已过，继续下载")
+		// 确保计数器已重置
+		if err := s.fileManager.ResetTodayDownloadCount(); err != nil {
+			logger.Warn().Err(err).Msg("重置下载计数器失败")
+		} else {
+			logger.Info().Msg("已重置下载计数器")
+		}
+		return
+	}
+
+	logger.Info().
+		Dur("sleep_duration", duration).
+		Time("wake_up_time", restUntil).
+		Str("duration_hours", fmt.Sprintf("%.2f", duration.Hours())).
+		Msg("检测到休息期间，等待休息结束")
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		logger.Info().Msg("休息被取消")
+		return
+	case <-timer.C:
+		// 验证计数器已重置
+		count, countErr := s.fileManager.GetTodayDownloadCount()
+		if countErr == nil {
+			logger.Info().
+				Int("reset_count", count).
+				Time("rest_until", restUntil).
+				Msg("休息结束，下载计数器已重置，继续下载")
+		} else {
+			logger.Info().
+				Time("rest_until", restUntil).
+				Msg("休息结束，继续下载")
+		}
+		return
+	}
 }
 
 // isBotDetectionError 检查错误是否是 bot detection

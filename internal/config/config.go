@@ -96,8 +96,11 @@ type YouTubeConfig struct {
 	BufferSize string `mapstructure:"buffer_size"`
 	// FileAccessRetries yt-dlp --file-access-retries（文件访问重试次数）
 	FileAccessRetries int `mapstructure:"file_access_retries"`
-	// DailyVideoLimit 每日视频爬取限制，达到限制后休眠到第二天（默认 80，0 表示不限制）
-	DailyVideoLimit int `mapstructure:"daily_video_limit"`
+	// VideoLimitBeforeRest 成功下载多少个视频后休息（默认 60，0 表示不限制）
+	VideoLimitBeforeRest int `mapstructure:"video_limit_before_rest"`
+	// RestDurationMin 休息时长范围（分钟），默认 7-8 小时（420-480分钟）
+	RestDurationMin int `mapstructure:"rest_duration_min"` // 最小休息时长（分钟）
+	RestDurationMax int `mapstructure:"rest_duration_max"` // 最大休息时长（分钟）
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
 	OffsetOverride int `mapstructure:"-"`
@@ -157,7 +160,9 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.limit_rate", "20M")
 	viper.SetDefault("youtube.buffer_size", "1M")
 	viper.SetDefault("youtube.file_access_retries", 5)
-	viper.SetDefault("youtube.daily_video_limit", 80)
+	viper.SetDefault("youtube.video_limit_before_rest", 60)
+	viper.SetDefault("youtube.rest_duration_min", 420) // 7小时 = 420分钟
+	viper.SetDefault("youtube.rest_duration_max", 480) // 8小时 = 480分钟
 	viper.SetDefault("output.subtitle_archive", "./output")
 
 	if configPath != "" {

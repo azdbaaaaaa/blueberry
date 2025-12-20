@@ -15,8 +15,10 @@ type uploadCounters struct {
 }
 
 type downloadCounters struct {
-	Date  string `json:"date"`
-	Count int    `json:"count"`
+	Date         string `json:"date"`          // 最后更新时间（格式: YYYY-MM-DD HH:MM:SS）
+	Count        int    `json:"count"`         // 当前计数
+	RestUntil    string `json:"rest_until"`    // 休息结束时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
+	RestDuration int    `json:"rest_duration"` // 休息时长（分钟），用于日志
 }
 
 func shortenErrorMessage(msg string) string {
@@ -85,9 +87,12 @@ type Repository interface {
 	GetTodayUploadCount(account string) (int, error)
 	IncrementTodayUploadCount(account string) error
 	LoadTodayUploadCounts() (map[string]int, error)
-	// 每日下载计数
+	// 下载计数（每N个视频后休息）
 	GetTodayDownloadCount() (int, error)
 	IncrementTodayDownloadCount() error
+	ResetTodayDownloadCount() error
+	IsInRestPeriod() (bool, time.Time, error)
+	SetDownloadRestUntil(restUntil time.Time, restDurationMinutes int) error
 	// 获取视频下载状态（status/downloaded/error）
 	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
 	// 标记是否存在（或已获得）1080p（或更高）的视频
@@ -1326,7 +1331,7 @@ func (r *repository) IncrementTodayUploadCount(account string) error {
 	return r.saveCountersRaw(uc)
 }
 
-// ---------- 每日下载计数（按天） ----------
+// ---------- 下载计数（每N个视频后休息） ----------
 
 func (r *repository) downloadCountersFile() string {
 	globalDir := filepath.Join(r.outputDir, ".global")
@@ -1340,30 +1345,44 @@ func (r *repository) loadDownloadCountersRaw() (*downloadCounters, error) {
 	if err != nil {
 		// 不存在则初始化
 		return &downloadCounters{
-			Date:  time.Now().Format("2006-01-02"),
+			Date:  time.Now().Format("2006-01-02 15:04:05"),
 			Count: 0,
 		}, nil
 	}
 	var dc downloadCounters
 	if err := json.Unmarshal(data, &dc); err != nil {
 		return &downloadCounters{
-			Date:  time.Now().Format("2006-01-02"),
+			Date:  time.Now().Format("2006-01-02 15:04:05"),
 			Count: 0,
 		}, nil
 	}
-	// 跨天则重置
-	today := time.Now().Format("2006-01-02")
-	if dc.Date != today {
-		dc = downloadCounters{
-			Date:  today,
-			Count: 0,
+
+	// 检查是否在休息期间
+	now := time.Now()
+	if dc.RestUntil != "" {
+		restUntil, err := time.Parse("2006-01-02 15:04:05", dc.RestUntil)
+		if err == nil {
+			if now.Before(restUntil) {
+				// 还在休息期间，保持计数
+				return &dc, nil
+			} else {
+				// 休息时间已过，重置计数
+				dc = downloadCounters{
+					Date:  time.Now().Format("2006-01-02 15:04:05"),
+					Count: 0,
+				}
+				// 保存重置后的状态
+				_ = r.saveDownloadCountersRaw(&dc)
+			}
 		}
 	}
+
 	return &dc, nil
 }
 
 func (r *repository) saveDownloadCountersRaw(dc *downloadCounters) error {
 	path := r.downloadCountersFile()
+	dc.Date = time.Now().Format("2006-01-02 15:04:05")
 	data, err := json.MarshalIndent(dc, "", "  ")
 	if err != nil {
 		return err
@@ -1385,5 +1404,56 @@ func (r *repository) IncrementTodayDownloadCount() error {
 		return err
 	}
 	dc.Count = dc.Count + 1
+	if err := r.saveDownloadCountersRaw(dc); err != nil {
+		return err
+	}
+	// 使用标准库的 log 包，因为这里没有 logger 依赖
+	// 或者可以添加 logger 依赖，但为了保持 repository 层的简洁，这里不添加日志
+	return nil
+}
+
+// SetDownloadRestUntil 设置休息结束时间
+func (r *repository) SetDownloadRestUntil(restUntil time.Time, restDurationMinutes int) error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.RestUntil = restUntil.Format("2006-01-02 15:04:05")
+	dc.RestDuration = restDurationMinutes
+	dc.Count = 0 // 重置计数
+	if err := r.saveDownloadCountersRaw(dc); err != nil {
+		return err
+	}
+	// 日志在 service 层记录，这里只负责数据持久化
+	return nil
+}
+
+// ResetTodayDownloadCount 重置今天的下载计数
+func (r *repository) ResetTodayDownloadCount() error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.Count = 0
+	dc.Date = time.Now().Format("2006-01-02 15:04:05")
+	dc.RestUntil = "" // 清除休息时间
+	dc.RestDuration = 0
 	return r.saveDownloadCountersRaw(dc)
+}
+
+// IsInRestPeriod 检查是否在休息期间
+func (r *repository) IsInRestPeriod() (bool, time.Time, error) {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if dc.RestUntil == "" {
+		return false, time.Time{}, nil
+	}
+	restUntil, err := time.Parse("2006-01-02 15:04:05", dc.RestUntil)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	now := time.Now()
+	return now.Before(restUntil), restUntil, nil
 }
