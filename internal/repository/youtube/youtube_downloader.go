@@ -231,6 +231,19 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 	}
 
 	// 所有尝试都失败了，且视频文件不存在
+	// 检查最终错误是否是 bot detection
+	if strings.Contains(lastOutput, "Sign in to confirm you're not a bot") ||
+		strings.Contains(lastOutput, "confirm you're not a bot") ||
+		strings.Contains(lastOutput, "authentication") {
+		logger.Error().
+			Str("video_url", videoURL).
+			Str("video_dir", videoDir).
+			Str("output", lastOutput).
+			Err(lastErr).
+			Msg("下载失败，检测到 bot detection")
+		return nil, fmt.Errorf("%w: %s", ErrBotDetection, lastOutput)
+	}
+
 	logger.Error().
 		Str("video_url", videoURL).
 		Str("video_dir", videoDir).

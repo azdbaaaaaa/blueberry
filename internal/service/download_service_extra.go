@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"blueberry/internal/config"
+	"blueberry/internal/repository/youtube"
 	"blueberry/pkg/logger"
 )
 
@@ -130,6 +132,10 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 		// 判断调用前后是否真的触发了下载（用于决定是否添加间隔）
 		downloadedBefore := s.fileManager.IsVideoDownloaded(videoDir)
 		if err := s.downloadVideoAndSaveInfo(ctx, channelID, videoID, title, url, languages, videoMap); err != nil {
+			// 检查是否是 bot detection 错误
+			if s.isBotDetectionError(err) {
+				s.handleBotDetection(ctx)
+			}
 			logger.Error().
 				Str("video_id", videoID).
 				Str("title", title).
@@ -237,6 +243,57 @@ func (s *downloadService) getDailyLimit() int {
 		return s.cfg.YouTube.DailyVideoLimit
 	}
 	return 80 // 默认值
+}
+
+// isBotDetectionError 检查错误是否是 bot detection
+func (s *downloadService) isBotDetectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "bot detection") ||
+		strings.Contains(errStr, "sign in to confirm you're not a bot") ||
+		strings.Contains(errStr, "confirm you're not a bot") ||
+		strings.Contains(errStr, "authentication") ||
+		errors.Is(err, youtube.ErrBotDetection)
+}
+
+// handleBotDetection 处理 bot detection，累计计数并在达到10次时休息
+func (s *downloadService) handleBotDetection(ctx context.Context) {
+	s.botDetectionCount++
+	logger.Warn().
+		Int("bot_detection_count", s.botDetectionCount).
+		Int("threshold", 10).
+		Msg("检测到 bot detection，累计计数")
+
+	// 达到10次时，休息8-12分钟
+	if s.botDetectionCount >= 10 {
+		// 生成8-12分钟的随机休息时间
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		restMinutes := 8 + rng.Intn(5) // 8-12分钟
+		restDuration := time.Duration(restMinutes) * time.Minute
+
+		logger.Warn().
+			Int("bot_detection_count", s.botDetectionCount).
+			Dur("rest_duration", restDuration).
+			Int("rest_minutes", restMinutes).
+			Msg("Bot detection 累计达到10次，开始休息")
+
+		// 休息
+		timer := time.NewTimer(restDuration)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			logger.Info().Msg("休息被取消")
+			return
+		case <-timer.C:
+			logger.Info().Msg("休息结束，重置 bot detection 计数器")
+			// 重置计数器
+			s.botDetectionCount = 0
+			return
+		}
+	}
 }
 
 // sleepUntilNextDay 休眠到第二天

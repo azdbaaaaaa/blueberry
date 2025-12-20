@@ -55,6 +55,8 @@ type downloadService struct {
 	// 每日下载计数器
 	dailyDownloadCount int
 	dailyDownloadDate  string // 格式: YYYY-MM-DD
+	// Bot detection 计数器
+	botDetectionCount int
 }
 
 // NewDownloadService 创建并返回一个新的 DownloadService 实例
