@@ -261,7 +261,8 @@ func (s *downloadService) getDownloadLimit() int {
 	if s.cfg != nil && s.cfg.YouTube.VideoLimitBeforeRest > 0 {
 		return s.cfg.YouTube.VideoLimitBeforeRest
 	}
-	return 60 // 默认值
+	// 如果配置未设置或为0，使用默认值 40（与 config.go 中的默认值保持一致）
+	return 40
 }
 
 // restAfterLimit 达到限制后休息

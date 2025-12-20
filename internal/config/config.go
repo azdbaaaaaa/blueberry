@@ -197,6 +197,21 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	// 如果配置文件中未设置某些字段，viper.Unmarshal 会使用零值（0），而不是默认值
+	// 这里需要手动应用默认值
+	if config.YouTube.VideoLimitBeforeRest == 0 {
+		config.YouTube.VideoLimitBeforeRest = 40 // 使用默认值
+	}
+	if config.YouTube.VideoLimitRestDuration == 0 {
+		config.YouTube.VideoLimitRestDuration = 60 // 使用默认值
+	}
+	if config.YouTube.BotDetectionThreshold == 0 {
+		config.YouTube.BotDetectionThreshold = 10 // 使用默认值
+	}
+	if config.YouTube.BotDetectionRestDuration == 0 {
+		config.YouTube.BotDetectionRestDuration = 480 // 使用默认值
+	}
+
 	if err := validate(&config); err != nil {
 		return nil, fmt.Errorf("配置验证失败: %w", err)
 	}
