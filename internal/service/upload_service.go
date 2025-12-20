@@ -682,19 +682,71 @@ func (s *uploadService) UploadAllChannels(ctx context.Context) error {
 }
 
 // getVideoDescription 优先从与视频同名的 .description 文件读取描述，若不存在则回退到 video_info.json 的 Description
+// 如果描述超过1500字符，会在换行或空格处裁剪
 func (s *uploadService) getVideoDescription(videoDir string, videoFile string) string {
 	base := strings.TrimSuffix(videoFile, filepath.Ext(videoFile))
 	descPath := base + ".description"
+	var desc string
 	if data, err := os.ReadFile(descPath); err == nil {
 		if txt := strings.TrimSpace(string(data)); txt != "" {
-			return txt
+			desc = txt
 		}
 	}
 	// 回退 video_info.json
-	if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
-		if d := strings.TrimSpace(info.Description); d != "" {
-			return d
+	if desc == "" {
+		if info, err := s.fileManager.LoadVideoInfo(videoDir); err == nil && info != nil {
+			if d := strings.TrimSpace(info.Description); d != "" {
+				desc = d
+			}
 		}
 	}
-	return ""
+
+	// 裁剪描述到1500字符以内，尽量在换行或空格处裁剪
+	return s.truncateDescription(desc)
+}
+
+// truncateDescription 裁剪描述到1500字符以内，尽量在换行或空格处裁剪
+func (s *uploadService) truncateDescription(desc string) string {
+	const maxLength = 1500
+	if len(desc) <= maxLength {
+		return desc
+	}
+
+	// 从maxLength位置向前查找最近的换行符或空格
+	// 优先查找换行符，其次查找空格
+	truncatePos := maxLength
+	foundNewline := false
+
+	// 先查找换行符（向前查找最多200个字符）
+	for i := maxLength; i > maxLength-200 && i > 0; i-- {
+		char := desc[i-1]
+		if char == '\n' || char == '\r' {
+			// 找到换行符，在换行符之后裁剪
+			truncatePos = i
+			foundNewline = true
+			break
+		}
+	}
+
+	// 如果没找到换行符，查找空格（向前查找最多100个字符）
+	if !foundNewline {
+		for i := maxLength; i > maxLength-100 && i > 0; i-- {
+			if desc[i-1] == ' ' {
+				// 找到空格，在空格之后裁剪
+				truncatePos = i
+				break
+			}
+		}
+	}
+
+	truncated := desc[:truncatePos]
+	// 移除末尾的空白字符
+	truncated = strings.TrimRight(truncated, " \n\r\t")
+
+	logger.Info().
+		Int("original_length", len(desc)).
+		Int("truncated_length", len(truncated)).
+		Msg("描述已裁剪")
+
+	return truncated
 }
