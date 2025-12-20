@@ -1,0 +1,23 @@
+[Unit]
+Description=Blueberry Upload Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/blueberry
+ExecStart=/opt/blueberry/blueberry upload --all --watch --config /opt/blueberry/config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 资源限制
+LimitNOFILE=65536
+
+# 环境变量
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+

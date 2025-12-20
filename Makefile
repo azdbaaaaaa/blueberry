@@ -82,11 +82,15 @@ push: build
 	fi; \
 	echo "Creating downloads and output directories..."; \
 	ssh $$SSH_OPTS $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST) "mkdir -p $(REMOTE_PUSH_DIR)/downloads $(REMOTE_PUSH_DIR)/output && chmod 755 $(REMOTE_PUSH_DIR)/downloads $(REMOTE_PUSH_DIR)/output"; \
-	if [ -f $(CONFIG_FILE) ]; then \
-		echo "Pushing config file: $(CONFIG_FILE) -> $(REMOTE_PUSH_DIR)/config.yaml"; \
+	CONFIG_NAME="config-$(REMOTE_PUSH_HOST).yaml"; \
+	if [ -f $$CONFIG_NAME ]; then \
+		echo "Pushing IP-specific config file: $$CONFIG_NAME -> $(REMOTE_PUSH_DIR)/$$CONFIG_NAME"; \
+		rsync -azP -e "ssh $$SSH_OPTS" $$CONFIG_NAME $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/$$CONFIG_NAME; \
+	elif [ -f $(CONFIG_FILE) ]; then \
+		echo "Pushing default config file: $(CONFIG_FILE) -> $(REMOTE_PUSH_DIR)/config.yaml"; \
 		rsync -azP -e "ssh $$SSH_OPTS" $(CONFIG_FILE) $(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST):$(REMOTE_PUSH_DIR)/config.yaml; \
 	else \
-		echo "Warning: Config file '$(CONFIG_FILE)' not found, skipping..."; \
+		echo "Warning: Config file '$(CONFIG_FILE)' or '$$CONFIG_NAME' not found, skipping..."; \
 		echo "Tip: You can push config.yaml.example as a template if needed"; \
 	fi; \
 	if [ -f config.yaml.example ]; then \

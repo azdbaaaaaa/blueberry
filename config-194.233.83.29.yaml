@@ -1,0 +1,13 @@
+youtube:
+  cookies_file: "./cookies/yt_2.txt"  # 136xxxx2542@164.com
+
+youtube_channels:
+  - url: "https://www.youtube.com/@Qixiang-Animation/videos"
+    languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
+    limit: 1000
+    offset: 0
+
+bilibili_accounts:
+  account1:
+    username: "ghDjd4JW2Fy9ecRq@gmail.com"
+    cookies_file: "./cookies/blbl_2.txt"

@@ -4,7 +4,7 @@
 # 示例: ./trim-channel-videos.sh ./downloads/频道名 10 0
 #       保留排序后的前10个视频文件夹，删除其他
 
-set -e
+# 不使用 set -e，因为删除操作可能部分失败，需要继续执行
 
 # 颜色输出
 RED='\033[0;31m'
@@ -53,7 +53,11 @@ VIDEO_DIRS=()
 while IFS= read -r -d '' dir; do
     # 只处理目录，排除 channel_info.json 等文件
     if [ -d "$dir" ]; then
-        VIDEO_DIRS+=("$dir")
+        dirname=$(basename "$dir")
+        # 排除 channel_info.json 等非视频文件夹
+        if [ "$dirname" != "channel_info.json" ] && [ "$dirname" != ".global" ]; then
+            VIDEO_DIRS+=("$dir")
+        fi
     fi
 done < <(find "$CHANNEL_PATH" -maxdepth 1 -mindepth 1 -print0 | sort -z)
 
@@ -66,9 +70,17 @@ fi
 
 echo -e "${GREEN}找到 $TOTAL_COUNT 个视频文件夹${NC}"
 
+# 调试：显示前几个文件夹名称
+echo -e "${YELLOW}[DEBUG] 前5个文件夹:${NC}"
+for ((i=0; i<5 && i<TOTAL_COUNT; i++)); do
+    echo "  [$i] $(basename "${VIDEO_DIRS[$i]}")"
+done
+
 # 计算要保留的范围
 START_INDEX=$OFFSET
 END_INDEX=$((OFFSET + LIMIT - 1))
+echo -e "${YELLOW}[DEBUG] 参数: LIMIT=$LIMIT, OFFSET=$OFFSET${NC}"
+echo -e "${YELLOW}[DEBUG] 计算: START_INDEX=$START_INDEX, END_INDEX=$END_INDEX${NC}"
 
 # 验证范围
 if [ $START_INDEX -ge $TOTAL_COUNT ]; then
@@ -142,30 +154,52 @@ echo ""
 echo -e "${YELLOW}开始删除...${NC}"
 
 # 删除 offset 之前的文件夹
-for ((i=0; i<START_INDEX && i<TOTAL_COUNT; i++)); do
-    dir="${VIDEO_DIRS[$i]}"
-    dirname=$(basename "$dir")
-    if rm -rf "$dir" 2>/dev/null; then
-        echo -e "${GREEN}✓ 已删除: $dirname${NC}"
-        ((DELETED++))
-    else
-        echo -e "${RED}✗ 删除失败: $dirname${NC}"
-        ((FAILED++))
-    fi
-done
+if [ $START_INDEX -gt 0 ]; then
+    echo -e "${YELLOW}[DEBUG] 开始删除 offset 之前的文件夹 (0 到 $((START_INDEX-1)))...${NC}"
+    for ((i=0; i<START_INDEX && i<TOTAL_COUNT; i++)); do
+        dir="${VIDEO_DIRS[$i]}"
+        if [ ! -d "$dir" ]; then
+            # 目录已不存在，跳过
+            echo -e "${YELLOW}[DEBUG] 跳过已不存在的目录: $dir${NC}"
+            continue
+        fi
+        dirname=$(basename "$dir")
+        echo -e "${YELLOW}[DEBUG] 尝试删除: $dir${NC}"
+        if rm -rf "$dir" 2>&1; then
+            echo -e "${GREEN}✓ 已删除: $dirname${NC}"
+            ((DELETED++))
+        else
+            echo -e "${RED}✗ 删除失败: $dirname${NC}"
+            ((FAILED++))
+        fi
+    done
+else
+    echo -e "${YELLOW}[DEBUG] offset=0，无需删除 offset 之前的文件夹${NC}"
+fi
 
 # 删除 offset+limit 之后的文件夹
-for ((i=END_INDEX+1; i<TOTAL_COUNT; i++)); do
-    dir="${VIDEO_DIRS[$i]}"
-    dirname=$(basename "$dir")
-    if rm -rf "$dir" 2>/dev/null; then
-        echo -e "${GREEN}✓ 已删除: $dirname${NC}"
-        ((DELETED++))
-    else
-        echo -e "${RED}✗ 删除失败: $dirname${NC}"
-        ((FAILED++))
-    fi
-done
+if [ $END_INDEX -lt $((TOTAL_COUNT - 1)) ]; then
+    echo -e "${YELLOW}[DEBUG] 开始删除 offset+limit 之后的文件夹 ($((END_INDEX+1)) 到 $((TOTAL_COUNT-1)))...${NC}"
+    for ((i=END_INDEX+1; i<TOTAL_COUNT; i++)); do
+        dir="${VIDEO_DIRS[$i]}"
+        if [ ! -d "$dir" ]; then
+            # 目录已不存在，跳过
+            echo -e "${YELLOW}[DEBUG] 跳过已不存在的目录: $dir${NC}"
+            continue
+        fi
+        dirname=$(basename "$dir")
+        echo -e "${YELLOW}[DEBUG] 尝试删除: $dir${NC}"
+        if rm -rf "$dir" 2>&1; then
+            echo -e "${GREEN}✓ 已删除: $dirname${NC}"
+            ((DELETED++))
+        else
+            echo -e "${RED}✗ 删除失败: $dirname${NC}"
+            ((FAILED++))
+        fi
+    done
+else
+    echo -e "${YELLOW}[DEBUG] 无需删除 offset+limit 之后的文件夹（END_INDEX=$END_INDEX, TOTAL_COUNT=$TOTAL_COUNT）${NC}"
+fi
 
 # 显示结果
 echo ""
@@ -177,5 +211,12 @@ if [ $FAILED -gt 0 ]; then
     echo -e "${RED}删除失败: $FAILED 个文件夹${NC}"
 fi
 echo "保留: $TO_KEEP 个文件夹"
+
+# 验证实际剩余数量
+REMAINING_COUNT=$(find "$CHANNEL_PATH" -maxdepth 1 -mindepth 1 -type d ! -name "channel_info.json" ! -name ".global" | wc -l)
+echo "实际剩余文件夹数: $REMAINING_COUNT"
+if [ $REMAINING_COUNT -ne $TO_KEEP ]; then
+    echo -e "${YELLOW}警告: 实际剩余数量 ($REMAINING_COUNT) 与预期保留数量 ($TO_KEEP) 不一致${NC}"
+fi
 echo "=========================================="
 

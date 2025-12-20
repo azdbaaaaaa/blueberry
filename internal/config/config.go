@@ -143,17 +143,19 @@ var globalConfig *Config
 func Load(configPath string) (*Config, error) {
 	// 默认值
 	viper.SetDefault("channel.generate_pending_downloads", false)
+	viper.SetDefault("bilibili.base_url", "https://www.bilibili.tv/en/")
 	viper.SetDefault("bilibili.daily_upload_limit", 160)
 	viper.SetDefault("bilibili.upload_subtitles", false)
-	viper.SetDefault("bilibili.chunk_upload_retries", 3)
+	viper.SetDefault("bilibili.chunk_upload_retries", 5)
 	viper.SetDefault("bilibili.chunk_retry_backoff_seconds", 1)
+	viper.SetDefault("bilibili.delete_original_after_upload", true)
 	viper.SetDefault("subtitles.auto_fix_overlap", false)
-	viper.SetDefault("youtube.force_download_undownloadable", false)
+	viper.SetDefault("youtube.force_download_undownloadable", true)
 	viper.SetDefault("youtube.min_height", 1080)
 	viper.SetDefault("youtube.disable_android_fallback", true)
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
-	viper.SetDefault("youtube.concurrent_fragments", 5)
+	viper.SetDefault("youtube.concurrent_fragments", 1)
 	viper.SetDefault("youtube.sleep_interval_seconds", 60)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
@@ -163,6 +165,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.video_limit_before_rest", 60)
 	viper.SetDefault("youtube.rest_duration_min", 420) // 7小时 = 420分钟
 	viper.SetDefault("youtube.rest_duration_max", 480) // 8小时 = 480分钟
+	viper.SetDefault("output.directory", "./downloads")
 	viper.SetDefault("output.subtitle_archive", "./output")
 
 	if configPath != "" {
