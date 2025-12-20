@@ -27,11 +27,12 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # 检查参数
 if [ $# -lt 2 ]; then
     log_error "参数不足"
-    echo "用法: $0 <ip> <action> [service_type]"
+    echo "用法: $0 <ip> <action> [service_type] [--init]"
     echo ""
     echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
     echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml）"
+    echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
     echo "  uninstall - 卸载 systemd 服务"
     echo "  start    - 启动服务"
     echo "  stop     - 停止服务"
@@ -46,6 +47,7 @@ if [ $# -lt 2 ]; then
     echo "示例:"
     echo "  $0 66.42.63.131 prepare"
     echo "  $0 66.42.63.131 install"
+    echo "  $0 66.42.63.131 install --init"
     echo "  $0 66.42.63.131 start download"
     echo "  $0 66.42.63.131 restart upload"
     exit 1
@@ -55,8 +57,29 @@ IP=$1
 ACTION=$2
 # 统一使用 config-${IP}.yaml 作为配置文件
 CONFIG_FILE="config-${IP}.yaml"
-# 第3个参数是 service_type（如果提供），否则使用默认值 both
-SERVICE_TYPE=${3:-"both"}
+
+# 解析参数：检查是否有 --init 选项
+INIT_AFTER_INSTALL=false
+SERVICE_TYPE="both"
+
+# 从参数中提取 --init 和 service_type
+shift 2  # 移除 IP 和 ACTION
+while [ $# -gt 0 ]; do
+    case $1 in
+        --init)
+            INIT_AFTER_INSTALL=true
+            shift
+            ;;
+        download|upload|both)
+            SERVICE_TYPE=$1
+            shift
+            ;;
+        *)
+            log_error "未知参数: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # 验证 IP 格式
 if [[ ! $IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -165,6 +188,18 @@ install_service() {
     remote_exec "systemctl daemon-reload"
     
     log_info "服务安装完成！"
+    
+    # 如果指定了 --init，执行 channel 命令获取频道信息
+    if [ "$INIT_AFTER_INSTALL" = true ]; then
+        log_info "执行初始化：获取频道信息..."
+        remote_exec "cd $REMOTE_DIR && $REMOTE_DIR/$BIN_NAME channel --config $REMOTE_DIR/config.yaml"
+        if [ $? -eq 0 ]; then
+            log_info "频道信息获取完成！"
+        else
+            log_warn "频道信息获取失败，请检查配置和网络连接"
+        fi
+    fi
+    
     log_info "使用以下命令启动服务:"
     echo "  $0 $IP start download"
     echo "  $0 $IP start upload"
