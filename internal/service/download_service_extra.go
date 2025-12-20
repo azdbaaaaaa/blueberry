@@ -39,44 +39,24 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 		return fmt.Errorf("未找到频道配置: %s", channelID)
 	}
 
-	// 加载频道信息
+	// 加载频道信息（channel_info.json 中已经应用了 limit 和 offset，直接使用所有视频）
 	videoMaps, err := s.fileManager.LoadChannelInfo(channelID)
 	if err != nil {
 		return fmt.Errorf("加载频道信息失败: %w", err)
 	}
 
-	// 计算有效的 offset/limit（命令行覆盖配置）
-	offset := 0
-	limit := 0
-	if s.cfg.YouTube.OffsetOverride != 0 || s.cfg.YouTube.LimitOverride != 0 {
-		offset = s.cfg.YouTube.OffsetOverride
-		limit = s.cfg.YouTube.LimitOverride
-	} else {
-		offset = channel.Offset
-		limit = channel.Limit
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	start := offset
-	end := len(videoMaps)
-	if limit > 0 && start+limit < end {
-		end = start + limit
-	}
-	if start > len(videoMaps) {
-		start = len(videoMaps)
-	}
-	if start < end {
-		videoMaps = videoMaps[start:end]
-	} else {
-		videoMaps = []map[string]interface{}{}
-	}
-
 	logger.Info().
 		Int("count", len(videoMaps)).
-		Int("offset", offset).
-		Int("limit", limit).
-		Msg("从文件加载视频列表（已应用 offset/limit）")
+		Str("channel_id", channelID).
+		Msg("从文件加载视频列表")
+
+	// 检查视频列表是否为空
+	if len(videoMaps) == 0 {
+		logger.Warn().
+			Str("channel_id", channelID).
+			Msg("频道信息文件中的视频列表为空，没有可下载的视频。请先运行 'channel' 命令同步频道信息")
+		return fmt.Errorf("频道 %s 的视频列表为空，请先运行 'channel' 命令同步频道信息", channelID)
+	}
 
 	// 获取频道语言配置
 	languages := s.getChannelLanguages(channel)
