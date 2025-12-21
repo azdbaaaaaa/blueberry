@@ -102,7 +102,14 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		output, err := cmd.CombinedOutput()
 		outputStr := string(output)
 
-		if err == nil {
+		// 检查输出中是否包含错误信息（即使 err == nil，yt-dlp 也可能在输出中报告错误）
+		hasErrorInOutput := strings.Contains(outputStr, "ERROR:") ||
+			strings.Contains(outputStr, "WARNING:") ||
+			strings.Contains(outputStr, "Sign in to confirm") ||
+			strings.Contains(outputStr, "bot detection") ||
+			strings.Contains(outputStr, "authentication")
+
+		if err == nil && !hasErrorInOutput {
 			// 成功，返回结果
 			videoFile, err := d.fileRepo.FindVideoFile(videoDir)
 			if err != nil {
@@ -144,6 +151,11 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			return result, nil
 		}
 
+		// 如果 err == nil 但输出中有错误，将 err 设置为一个错误以便后续处理
+		if err == nil && hasErrorInOutput {
+			err = fmt.Errorf("yt-dlp 输出中包含错误信息")
+		}
+
 		lastErr = err
 		lastOutput = outputStr
 
@@ -151,6 +163,9 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		exitCode := -1
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState != nil {
 			exitCode = ee.ProcessState.ExitCode()
+		} else if err == nil && hasErrorInOutput {
+			// 如果 err == nil 但输出中有错误，设置退出码为 1
+			exitCode = 1
 		}
 
 		// 检查是否是认证错误（bot detection）
@@ -160,24 +175,28 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 		if isBotDetection {
 			// 不立即中止，尝试下一种策略，但先打印详细错误信息
-			logger.Warn().
+			// 使用 Error 级别确保错误信息被记录
+			logger.Error().
 				Int("strategy_index", i+1).
 				Str("client", t.client).
 				Bool("with_cookies", t.includeCookie).
 				Int("exit_code", exitCode).
 				Str("output_preview", previewForLog(outputStr, 800)).
+				Str("output_full", outputStr). // 添加完整输出
 				Err(err).
 				Msg("下载失败（检测到 bot detection），继续尝试下一种策略")
 			continue
 		}
 
 		// 其他错误，打印详细错误信息
-		logger.Warn().
+		// 使用 Error 级别确保错误信息被记录
+		logger.Error().
 			Int("strategy_index", i+1).
 			Str("client", t.client).
 			Bool("with_cookies", t.includeCookie).
 			Int("exit_code", exitCode).
 			Str("output_preview", previewForLog(outputStr, 800)).
+			Str("output_full", outputStr). // 添加完整输出
 			Err(err).
 			Msg("下载失败，继续尝试下一种策略")
 	}
