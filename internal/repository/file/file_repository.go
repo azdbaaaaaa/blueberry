@@ -15,11 +15,12 @@ type uploadCounters struct {
 }
 
 type downloadCounters struct {
-	Date              string `json:"date"`                // 最后更新时间（格式: YYYY-MM-DD HH:MM:SS）
-	Count             int    `json:"count"`               // 当前下载计数
-	RestUntil         string `json:"rest_until"`          // 休息结束时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
-	RestDuration      int    `json:"rest_duration"`       // 休息时长（分钟），用于日志
-	BotDetectionCount int    `json:"bot_detection_count"` // 机器人检测累计计数
+	Date                  string `json:"date"`                     // 最后更新时间（格式: YYYY-MM-DD HH:MM:SS）
+	Count                 int    `json:"count"`                    // 当前下载计数
+	RestUntil             string `json:"rest_until"`               // 休息结束时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
+	RestDuration          int    `json:"rest_duration"`            // 休息时长（分钟），用于日志
+	BotDetectionCount     int    `json:"bot_detection_count"`      // 机器人检测累计计数
+	BotDetectionRestStart string `json:"bot_detection_rest_start"` // 机器人检测休息开始时间（格式: YYYY-MM-DD HH:MM:SS），为空表示不在休息
 }
 
 func shortenErrorMessage(msg string) string {
@@ -98,6 +99,9 @@ type Repository interface {
 	GetBotDetectionCount() (int, error)
 	IncrementBotDetectionCount() error
 	ResetBotDetectionCount() error
+	// 机器人检测休息时间管理（只记录开始时间，根据配置计算截止时间）
+	SetBotDetectionRestStart(restStart time.Time) error
+	IsInBotDetectionRestPeriod(restDurationMinutes int) (bool, time.Time, error)
 	// 获取视频下载状态（status/downloaded/error）
 	GetDownloadVideoStatus(videoDir string) (string, bool, string, error)
 	// 标记是否存在（或已获得）1080p（或更高）的视频
@@ -1356,17 +1360,19 @@ func (r *repository) loadDownloadCountersRaw() (*downloadCounters, error) {
 	if err != nil {
 		// 不存在则初始化
 		return &downloadCounters{
-			Date:              time.Now().Format("2006-01-02 15:04:05"),
-			Count:             0,
-			BotDetectionCount: 0,
+			Date:                  time.Now().Format("2006-01-02 15:04:05"),
+			Count:                 0,
+			BotDetectionCount:     0,
+			BotDetectionRestStart: "",
 		}, nil
 	}
 	var dc downloadCounters
 	if err := json.Unmarshal(data, &dc); err != nil {
 		return &downloadCounters{
-			Date:              time.Now().Format("2006-01-02 15:04:05"),
-			Count:             0,
-			BotDetectionCount: 0,
+			Date:                  time.Now().Format("2006-01-02 15:04:05"),
+			Count:                 0,
+			BotDetectionCount:     0,
+			BotDetectionRestStart: "",
 		}, nil
 	}
 
@@ -1480,7 +1486,51 @@ func (r *repository) ResetBotDetectionCount() error {
 		return err
 	}
 	dc.BotDetectionCount = 0
+	dc.BotDetectionRestStart = "" // 清除休息开始时间
 	return r.saveDownloadCountersRaw(dc)
+}
+
+// SetBotDetectionRestStart 设置机器人检测休息开始时间（只记录开始时间）
+func (r *repository) SetBotDetectionRestStart(restStart time.Time) error {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return err
+	}
+	dc.BotDetectionRestStart = restStart.Format("2006-01-02 15:04:05")
+	return r.saveDownloadCountersRaw(dc)
+}
+
+// IsInBotDetectionRestPeriod 检查是否在机器人检测休息期间
+// restDurationMinutes: 休息时长（分钟），从配置中读取
+// 返回: (是否在休息期间, 休息截止时间, 错误)
+func (r *repository) IsInBotDetectionRestPeriod(restDurationMinutes int) (bool, time.Time, error) {
+	dc, err := r.loadDownloadCountersRaw()
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if dc.BotDetectionRestStart == "" {
+		return false, time.Time{}, nil
+	}
+
+	restStart, err := time.Parse("2006-01-02 15:04:05", dc.BotDetectionRestStart)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+
+	// 根据开始时间和配置的休息时长计算截止时间
+	restDuration := time.Duration(restDurationMinutes) * time.Minute
+	restUntil := restStart.Add(restDuration)
+
+	now := time.Now()
+	if now.Before(restUntil) {
+		// 还在休息期间
+		return true, restUntil, nil
+	} else {
+		// 休息时间已过，清除休息开始时间
+		dc.BotDetectionRestStart = ""
+		_ = r.saveDownloadCountersRaw(dc)
+		return false, time.Time{}, nil
+	}
 }
 
 // IsInRestPeriod 检查是否在休息期间

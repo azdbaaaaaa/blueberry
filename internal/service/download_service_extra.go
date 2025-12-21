@@ -61,28 +61,44 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 	// 获取频道语言配置
 	languages := s.getChannelLanguages(channel)
 
-	// 检查是否在休息期间
+	// 检查是否在下载限制的休息期间
 	if inRest, restUntil, err := s.fileManager.IsInRestPeriod(); err == nil {
 		if inRest {
 			logger.Info().
 				Time("rest_until", restUntil).
 				Dur("remaining", time.Until(restUntil)).
-				Msg("检测到正在休息期间，等待休息结束")
+				Msg("检测到正在休息期间（下载限制），等待休息结束")
 			s.sleepUntilRestEnd(ctx, restUntil)
 			// 休息结束后，计数器已重置，继续下载
 			logger.Info().Msg("休息结束，继续下载")
-		} else {
-			// 加载当前下载计数
-			count, countErr := s.fileManager.GetTodayDownloadCount()
-			if countErr == nil {
-				logger.Info().
-					Int("current_count", count).
-					Int("limit", s.getDownloadLimit()).
-					Msg("开始下载，当前下载计数")
-			}
 		}
-	} else {
-		logger.Warn().Err(err).Msg("检查休息状态失败")
+	}
+
+	// 检查是否在 bot detection 休息期间
+	restBase := 120 // 默认2小时 = 120分钟
+	if s.cfg != nil && s.cfg.YouTube.BotDetectionRestDuration > 0 {
+		restBase = s.cfg.YouTube.BotDetectionRestDuration
+	}
+	if inBotRest, botRestUntil, err := s.fileManager.IsInBotDetectionRestPeriod(restBase); err == nil {
+		if inBotRest {
+			logger.Info().
+				Time("rest_until", botRestUntil).
+				Dur("remaining", time.Until(botRestUntil)).
+				Int("rest_duration_minutes", restBase).
+				Msg("检测到正在休息期间（bot detection），等待休息结束")
+			s.sleepUntilRestEnd(ctx, botRestUntil)
+			// 休息结束后，继续下载
+			logger.Info().Msg("Bot detection 休息结束，继续下载")
+		}
+	}
+
+	// 加载当前下载计数
+	count, countErr := s.fileManager.GetTodayDownloadCount()
+	if countErr == nil {
+		logger.Info().
+			Int("current_count", count).
+			Int("limit", s.getDownloadLimit()).
+			Msg("开始下载，当前下载计数")
 	}
 
 	// 遍历每个视频，逐个下载
@@ -138,12 +154,28 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 		downloadedBefore := s.fileManager.IsVideoDownloaded(videoDir)
 		if err := s.downloadVideoAndSaveInfo(ctx, channelID, videoID, title, url, languages, videoMap); err != nil {
 			// 检查是否是 bot detection 错误
-			if s.isBotDetectionError(err) {
+			isBotErr := s.isBotDetectionError(err)
+			logger.Debug().
+				Str("video_id", videoID).
+				Bool("is_bot_detection_error", isBotErr).
+				Str("error_string", err.Error()).
+				Msg("检查下载错误类型")
+
+			if isBotErr {
+				logger.Info().
+					Str("video_id", videoID).
+					Str("title", title).
+					Err(err).
+					Msg("检测到 bot detection 错误，开始处理")
 				s.handleBotDetection(ctx)
+				logger.Info().
+					Str("video_id", videoID).
+					Msg("handleBotDetection 函数返回，继续处理下一个视频")
 			}
 			logger.Error().
 				Str("video_id", videoID).
 				Str("title", title).
+				Bool("is_bot_detection", isBotErr).
 				Err(err).
 				Msg("下载视频失败，继续处理下一个")
 			continue
@@ -383,32 +415,42 @@ func (s *downloadService) isBotDetectionError(err error) bool {
 
 // handleBotDetection 处理 bot detection，累计计数并在达到阈值时休息
 func (s *downloadService) handleBotDetection(ctx context.Context) {
+	logger.Info().Msg("开始处理 bot detection（handleBotDetection 函数被调用）")
+
 	// 获取触发阈值配置
 	threshold := 10 // 默认10次
 	if s.cfg != nil && s.cfg.YouTube.BotDetectionThreshold > 0 {
 		threshold = s.cfg.YouTube.BotDetectionThreshold
 	}
+	logger.Debug().Int("threshold", threshold).Msg("Bot detection 阈值配置")
 
 	// 从文件加载当前计数
 	currentCount, err := s.fileManager.GetBotDetectionCount()
+	logger.Debug().Int("current_count_before", currentCount).Err(err).Msg("加载 bot detection 计数")
 	if err != nil {
 		logger.Warn().Err(err).Msg("加载 bot detection 计数失败，使用内存计数器")
 		s.botDetectionCount++
 		currentCount = s.botDetectionCount
+		logger.Debug().Int("memory_count", currentCount).Msg("使用内存计数器")
 	} else {
 		// 增加计数并保存到文件
+		logger.Debug().Int("count_before_increment", currentCount).Msg("准备增加 bot detection 计数")
 		if err := s.fileManager.IncrementBotDetectionCount(); err != nil {
 			logger.Warn().Err(err).Msg("保存 bot detection 计数失败，使用内存计数器")
 			s.botDetectionCount++
 			currentCount = s.botDetectionCount
+			logger.Debug().Int("memory_count", currentCount).Msg("使用内存计数器（保存失败）")
 		} else {
 			// 重新加载以获取最新值
 			if newCount, loadErr := s.fileManager.GetBotDetectionCount(); loadErr == nil {
+				logger.Debug().Int("old_count", currentCount).Int("new_count", newCount).Msg("成功增加并重新加载计数")
 				currentCount = newCount
 				s.botDetectionCount = newCount
 			} else {
+				logger.Warn().Err(loadErr).Msg("重新加载 bot detection 计数失败，使用内存计数器")
 				s.botDetectionCount++
 				currentCount = s.botDetectionCount
+				logger.Debug().Int("memory_count", currentCount).Msg("使用内存计数器（重新加载失败）")
 			}
 		}
 	}
@@ -416,12 +458,13 @@ func (s *downloadService) handleBotDetection(ctx context.Context) {
 	logger.Warn().
 		Int("bot_detection_count", currentCount).
 		Int("threshold", threshold).
+		Int("remaining", threshold-currentCount).
 		Msg("检测到 bot detection，累计计数")
 
 	// 达到阈值时，休息
 	if currentCount >= threshold {
 		// 获取休息时长配置
-		restBase := 60 // 默认1小时 = 60分钟
+		restBase := 120 // 默认2小时 = 120分钟
 		if s.cfg != nil && s.cfg.YouTube.BotDetectionRestDuration > 0 {
 			restBase = s.cfg.YouTube.BotDetectionRestDuration
 		}
@@ -437,28 +480,71 @@ func (s *downloadService) handleBotDetection(ctx context.Context) {
 			Int("threshold", threshold).
 			Int("rest_base_minutes", restBase).
 			Int("rest_minutes", restMinutes).
+			Int("rest_hours", restMinutes/60).
 			Dur("rest_duration", restDuration).
 			Msg("Bot detection 累计达到阈值，开始休息")
 
-		// 休息
+		// 休息（只记录开始时间，不记录截止时间）
+		restStartTime := time.Now()
+		// 保存休息开始时间到文件
+		if err := s.fileManager.SetBotDetectionRestStart(restStartTime); err != nil {
+			logger.Warn().Err(err).Msg("保存 bot detection 休息开始时间失败")
+		}
+		logger.Info().
+			Time("rest_start", restStartTime).
+			Int("rest_minutes", restMinutes).
+			Int("rest_hours", restMinutes/60).
+			Dur("rest_duration", restDuration).
+			Msg("开始休息，等待 bot detection 冷却期结束")
+
 		timer := time.NewTimer(restDuration)
 		defer timer.Stop()
 
-		select {
-		case <-ctx.Done():
-			logger.Info().Msg("休息被取消")
-			return
-		case <-timer.C:
-			logger.Info().Msg("休息结束，重置 bot detection 计数器")
-			// 重置计数器（保存到文件）
-			if err := s.fileManager.ResetBotDetectionCount(); err != nil {
-				logger.Warn().Err(err).Msg("重置 bot detection 计数失败")
-			} else {
-				s.botDetectionCount = 0
+		// 添加心跳日志（每5分钟输出一次）
+		heartbeatTicker := time.NewTicker(5 * time.Minute)
+		defer heartbeatTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info().Msg("休息被取消")
+				return
+			case <-heartbeatTicker.C:
+				elapsed := time.Since(restStartTime)
+				remaining := restDuration - elapsed
+				if remaining > 0 {
+					logger.Info().
+						Dur("elapsed", elapsed).
+						Dur("remaining", remaining).
+						Msg("Bot detection 休息中（心跳日志）")
+				}
+			case <-timer.C:
+				logger.Info().Msg("休息结束，重置 bot detection 计数器")
+				// 重置计数器（保存到文件）
+				if err := s.fileManager.ResetBotDetectionCount(); err != nil {
+					logger.Warn().Err(err).Msg("重置 bot detection 计数失败")
+				} else {
+					s.botDetectionCount = 0
+					logger.Info().Msg("Bot detection 计数器已重置")
+				}
+				return
 			}
-			return
 		}
 	}
+
+	// 未达到阈值，继续下载
+	logger.Info().
+		Int("current_count", currentCount).
+		Int("threshold", threshold).
+		Int("remaining", threshold-currentCount).
+		Msg("Bot detection 未达到阈值，继续下载")
+
+	// 未达到阈值，继续下载
+	logger.Info().
+		Int("current_count", currentCount).
+		Int("threshold", threshold).
+		Int("remaining", threshold-currentCount).
+		Msg("Bot detection 未达到阈值，继续下载")
 }
 
 // sleepUntilNextDay 休眠到第二天

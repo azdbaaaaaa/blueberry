@@ -103,7 +103,7 @@ type YouTubeConfig struct {
 	VideoLimitRestDuration int `mapstructure:"video_limit_rest_duration"`
 	// BotDetectionThreshold 机器人检测累计多少次后触发休息（默认 10 次）
 	BotDetectionThreshold int `mapstructure:"bot_detection_threshold"`
-	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 8 小时（480分钟），实际休息时间会在此基础上随机增加 0-10%
+	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 2 小时（120分钟），实际休息时间会在此基础上随机增加 0-10%
 	BotDetectionRestDuration int `mapstructure:"bot_detection_rest_duration"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
@@ -160,7 +160,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.force_ipv6", true) // 默认启用 IPv6
 	viper.SetDefault("youtube.retries", 3)
 	viper.SetDefault("youtube.fragment_retries", 3)
-	viper.SetDefault("youtube.concurrent_fragments", 3)
+	viper.SetDefault("youtube.concurrent_fragments", 1)
 	viper.SetDefault("youtube.sleep_interval_seconds", 30)
 	viper.SetDefault("youtube.sleep_requests_seconds", 3)
 	viper.SetDefault("youtube.sleep_subtitles_seconds", 2)
@@ -170,7 +170,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.video_limit_before_rest", 40)
 	viper.SetDefault("youtube.video_limit_rest_duration", 60)    // 1小时 = 60分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("youtube.bot_detection_threshold", 10)      // 机器人检测累计10次后触发休息
-	viper.SetDefault("youtube.bot_detection_rest_duration", 480) // 8小时 = 480分钟，实际休息时间会在此基础上随机增加 0-10%
+	viper.SetDefault("youtube.bot_detection_rest_duration", 120) // 2小时 = 120分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("output.directory", "./downloads")
 	viper.SetDefault("output.subtitle_archive", "./output")
 
@@ -209,13 +209,13 @@ func Load(configPath string) (*Config, error) {
 		config.YouTube.BotDetectionThreshold = 10 // 使用默认值
 	}
 	if config.YouTube.BotDetectionRestDuration == 0 {
-		config.YouTube.BotDetectionRestDuration = 480 // 使用默认值
+		config.YouTube.BotDetectionRestDuration = 120 // 使用默认值
 	}
 	if config.YouTube.SleepIntervalSeconds == 0 {
 		config.YouTube.SleepIntervalSeconds = 30 // 使用默认值
 	}
 	if config.YouTube.ConcurrentFragments == 0 {
-		config.YouTube.ConcurrentFragments = 3 // 使用默认值
+		config.YouTube.ConcurrentFragments = 1 // 使用默认值
 	}
 
 	if err := validate(&config); err != nil {

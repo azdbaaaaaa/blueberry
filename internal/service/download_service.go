@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -952,6 +953,10 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			errorMsg := err.Error()
 			if markErr := s.fileManager.MarkVideoFailed(videoDir, errorMsg); markErr != nil {
 				logger.Warn().Err(markErr).Msg("标记下载失败状态失败")
+			}
+			// 如果是 bot detection 错误，直接返回，不要包装，以便上层能正确检测
+			if errors.Is(err, youtube.ErrBotDetection) || strings.Contains(strings.ToLower(err.Error()), "bot detection") {
+				return err
 			}
 			return fmt.Errorf("下载视频失败: %w", err)
 		}

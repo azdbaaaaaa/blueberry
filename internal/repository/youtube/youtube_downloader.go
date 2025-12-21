@@ -99,8 +99,170 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			Msg("执行下载命令（按策略）")
 
 		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-		output, err := cmd.CombinedOutput()
-		outputStr := string(output)
+
+		// 使用管道实时读取输出，避免长时间阻塞无日志
+		var outputStr string
+		var err error
+
+		stdoutPipe, pipeErr := cmd.StdoutPipe()
+		if pipeErr != nil {
+			logger.Error().Err(pipeErr).Msg("创建 stdout 管道失败，使用 CombinedOutput")
+			output, cmdErr := cmd.CombinedOutput()
+			outputStr = string(output)
+			err = cmdErr
+		} else {
+			stderrPipe, pipeErr := cmd.StderrPipe()
+			if pipeErr != nil {
+				logger.Error().Err(pipeErr).Msg("创建 stderr 管道失败，使用 CombinedOutput")
+				output, cmdErr := cmd.CombinedOutput()
+				outputStr = string(output)
+				err = cmdErr
+			} else {
+				// 启动命令
+				if startErr := cmd.Start(); startErr != nil {
+					outputStr = ""
+					err = startErr
+				} else {
+					// 实时读取输出
+					var outputBuilder strings.Builder
+					outputDone := make(chan bool, 2)
+
+					// 读取 stdout
+					go func() {
+						scanner := bufio.NewScanner(stdoutPipe)
+						for scanner.Scan() {
+							line := scanner.Text()
+							outputBuilder.WriteString(line)
+							outputBuilder.WriteString("\n")
+							// 如果输出中包含进度信息，立即记录
+							if strings.Contains(line, "[download]") || strings.Contains(line, "%") {
+								logger.Info().
+									Int("strategy_index", i+1).
+									Str("client", t.client).
+									Str("progress", line).
+									Msg("下载进度")
+							}
+						}
+						outputDone <- true
+					}()
+
+					// 读取 stderr
+					go func() {
+						scanner := bufio.NewScanner(stderrPipe)
+						for scanner.Scan() {
+							line := scanner.Text()
+							outputBuilder.WriteString(line)
+							outputBuilder.WriteString("\n")
+							// 错误信息立即记录
+							if strings.Contains(line, "ERROR:") || strings.Contains(line, "WARNING:") {
+								logger.Warn().
+									Int("strategy_index", i+1).
+									Str("client", t.client).
+									Str("error_line", line).
+									Msg("yt-dlp 输出错误")
+							}
+							// 检查 bot detection（立即记录）
+							if strings.Contains(line, "Sign in to confirm") ||
+								strings.Contains(line, "confirm you're not a bot") ||
+								strings.Contains(line, "bot detection") ||
+								strings.Contains(line, "authentication") {
+								logger.Error().
+									Int("strategy_index", i+1).
+									Str("client", t.client).
+									Str("error_line", line).
+									Msg("检测到 bot detection（从 stderr）")
+							}
+						}
+						outputDone <- true
+					}()
+
+					// 定期输出心跳日志（每60秒）
+					ticker := time.NewTicker(60 * time.Second)
+					defer ticker.Stop()
+					cmdDone := make(chan error, 1)
+
+					go func() {
+						cmdDone <- cmd.Wait()
+					}()
+
+					startTime := time.Now()
+					for {
+						select {
+						case waitErr := <-cmdDone:
+							ticker.Stop()
+							// 等待输出读取完成（最多等待5秒）
+							timeout := time.After(5 * time.Second)
+							outputReadCount := 0
+						readLoop:
+							for outputReadCount < 2 {
+								select {
+								case <-outputDone:
+									outputReadCount++
+								case <-timeout:
+									logger.Warn().
+										Int("strategy_index", i+1).
+										Int("read_count", outputReadCount).
+										Msg("等待输出读取超时，继续处理")
+									break readLoop
+								}
+							}
+							outputStr = outputBuilder.String()
+							err = waitErr
+							// 记录命令完成信息
+							exitCode := 0
+							if waitErr != nil {
+								if ee, ok := waitErr.(*exec.ExitError); ok && ee.ProcessState != nil {
+									exitCode = ee.ProcessState.ExitCode()
+								} else {
+									exitCode = -1
+								}
+							}
+							logger.Debug().
+								Int("strategy_index", i+1).
+								Int("exit_code", exitCode).
+								Int("output_length", len(outputStr)).
+								Str("output_full", outputStr).
+								Err(err).
+								Msg("命令执行完成")
+							goto processOutput
+						case <-ticker.C:
+							// 定期输出心跳日志
+							elapsed := time.Since(startTime)
+							logger.Info().
+								Int("strategy_index", i+1).
+								Str("client", t.client).
+								Bool("with_cookies", t.includeCookie).
+								Dur("elapsed", elapsed).
+								Msg("下载进行中（心跳日志）")
+						case <-ctx.Done():
+							ticker.Stop()
+							cmd.Process.Kill()
+							return nil, ctx.Err()
+						}
+					}
+				}
+			}
+		}
+
+		// 回退到 CombinedOutput（如果管道方式失败）
+		if outputStr == "" {
+			output, cmdErr := cmd.CombinedOutput()
+			outputStr = string(output)
+			if err == nil {
+				err = cmdErr
+			}
+		}
+
+	processOutput:
+
+		// 记录处理输出的调试信息（输出完整内容）
+		logger.Debug().
+			Int("strategy_index", i+1).
+			Int("output_length", len(outputStr)).
+			Bool("has_error", err != nil).
+			Str("output_full", outputStr).
+			Err(err).
+			Msg("开始处理命令输出")
 
 		// 检查输出中是否包含错误信息（即使 err == nil，yt-dlp 也可能在输出中报告错误）
 		hasErrorInOutput := strings.Contains(outputStr, "ERROR:") ||
@@ -108,6 +270,33 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			strings.Contains(outputStr, "Sign in to confirm") ||
 			strings.Contains(outputStr, "bot detection") ||
 			strings.Contains(outputStr, "authentication")
+
+		// 检查是否是认证错误（bot detection）- 使用更宽松的匹配
+		check1 := strings.Contains(outputStr, "Sign in to confirm")
+		check2 := strings.Contains(outputStr, "confirm you're not a bot")
+		check3 := strings.Contains(outputStr, "not a bot")
+		check4 := strings.Contains(outputStr, "authentication")
+		check5 := strings.Contains(outputStr, "bot detection")
+		isBotDetection := check1 || check2 || check3 || check4 || check5
+
+		// 强制记录错误信息（无论是否有错误，只要有输出就记录）
+		// 使用 Error 级别确保可见
+		logger.Error().
+			Int("strategy_index", i+1).
+			Str("client", t.client).
+			Bool("with_cookies", t.includeCookie).
+			Bool("has_error", err != nil).
+			Bool("has_error_in_output", hasErrorInOutput).
+			Bool("is_bot_detection", isBotDetection).
+			Bool("check_sign_in", check1).
+			Bool("check_confirm_bot", check2).
+			Bool("check_not_bot", check3).
+			Bool("check_authentication", check4).
+			Bool("check_bot_detection", check5).
+			Int("output_length", len(outputStr)).
+			Str("output_full", outputStr).
+			Err(err).
+			Msg("命令执行结果（包含完整输出）")
 
 		if err == nil && !hasErrorInOutput {
 			// 成功，返回结果
@@ -168,11 +357,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			exitCode = 1
 		}
 
-		// 检查是否是认证错误（bot detection）
-		isBotDetection := strings.Contains(outputStr, "Sign in to confirm you're not a bot") ||
-			strings.Contains(outputStr, "confirm you're not a bot") ||
-			strings.Contains(outputStr, "authentication")
-
+		// 使用之前已定义的 isBotDetection 变量
 		if isBotDetection {
 			// 不立即中止，尝试下一种策略，但先打印详细错误信息
 			// 使用 Error 级别确保错误信息被记录
@@ -181,11 +366,20 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				Str("client", t.client).
 				Bool("with_cookies", t.includeCookie).
 				Int("exit_code", exitCode).
-				Str("output_preview", previewForLog(outputStr, 800)).
-				Str("output_full", outputStr). // 添加完整输出
+				Bool("is_bot_detection", true).
+				Str("output_full", outputStr).
 				Err(err).
 				Msg("下载失败（检测到 bot detection），继续尝试下一种策略")
 			continue
+		} else {
+			// 记录为什么没有进入 bot detection 分支
+			logger.Debug().
+				Int("strategy_index", i+1).
+				Bool("is_bot_detection", false).
+				Bool("check_sign_in", check1).
+				Bool("check_confirm_bot", check2).
+				Bool("check_not_bot", check3).
+				Msg("未检测到 bot detection，继续处理其他错误")
 		}
 
 		// 其他错误，打印详细错误信息
