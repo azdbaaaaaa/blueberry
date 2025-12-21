@@ -47,7 +47,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action> [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
     echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml）"
     echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
@@ -59,6 +59,7 @@ if [ $# -lt 1 ]; then
     echo "  enable   - 启用服务自启动"
     echo "  disable  - 禁用服务自启动"
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
+    echo "  reset    - 清除机器人检测和下载计数的持久化数据"
     echo ""
     echo "Service types: download, upload, both (默认: both)"
     echo ""
@@ -391,6 +392,73 @@ logs_service_for_ip() {
     esac
 }
 
+# 清除持久化数据（针对单个 IP）
+reset_counters_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "清除机器人检测和下载计数的持久化数据..."
+    
+    local counters_file="$REMOTE_DIR/downloads/.global/download_counters.json"
+    
+    # 检查文件是否存在
+    if remote_exec "test -f $counters_file"; then
+        # 备份原文件（可选）
+        local backup_file="${counters_file}.backup.$(date +%Y%m%d_%H%M%S)"
+        remote_exec "cp $counters_file $backup_file 2>/dev/null || true"
+        log_ip "$ip" "已备份原文件: $backup_file"
+        
+        # 重置为初始值（使用远程服务器的当前时间）
+        remote_exec "python3 -c \"
+import json
+from datetime import datetime
+data = {
+    'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'count': 0,
+    'rest_until': '',
+    'rest_duration': 0,
+    'bot_detection_count': 0,
+    'bot_detection_rest_start': ''
+}
+with open('$counters_file', 'w') as f:
+    json.dump(data, f, indent=2)
+\""
+        
+        if [ $? -eq 0 ]; then
+            log_ip "$ip" "✓ 持久化数据已清除（下载计数、机器人检测计数、休息时间已重置）"
+        else
+            log_error "[$ip] 清除持久化数据失败"
+            return 1
+        fi
+    else
+        log_warn "[$ip] 持久化数据文件不存在: $counters_file，可能从未运行过下载服务"
+        # 创建初始文件
+        remote_exec "mkdir -p $REMOTE_DIR/downloads/.global" || return 1
+        remote_exec "python3 -c \"
+import json
+from datetime import datetime
+data = {
+    'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'count': 0,
+    'rest_until': '',
+    'rest_duration': 0,
+    'bot_detection_count': 0,
+    'bot_detection_rest_start': ''
+}
+with open('$counters_file', 'w') as f:
+    json.dump(data, f, indent=2)
+\""
+        if [ $? -eq 0 ]; then
+            log_ip "$ip" "✓ 已创建初始持久化数据文件"
+        else
+            log_error "[$ip] 创建持久化数据文件失败"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
 # 处理所有 IP 的主函数
 process_all_ips() {
     local action=$1
@@ -502,6 +570,14 @@ process_all_ips() {
                 fi
                 logs_service_for_ip "$ip"
                 exit 0
+                ;;
+            reset)
+                if reset_counters_for_ip "$ip"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                    failed_ips+=("$ip")
+                fi
                 ;;
             *)
                 log_error "未知操作: $action"
