@@ -1,0 +1,14 @@
+youtube:
+  cookies_file: "./cookies/yt_1.txt" #17721221433@163.com
+  video_limit_before_rest: 30  # 成功下载多少个视频后休息（0 表示不限制）
+  concurrent_fragments: 1  # 并发下载片段数，提高下载速度
+  sleep_interval_seconds: 30  # 睡眠间隔时间（秒）
+  
+youtube_channels:
+  - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB/videos"
+    languages: ["en", "id", "th", "zh-Hans"]  # 魔力動漫俱樂部 Mag  564
+bilibili_accounts:
+  account1:
+    username: "ghDjd4JW2Fy9ecRq@gmail.com"
+    userid: "1256596736"
+    cookies_file: "./cookies/blbl_1.txt"

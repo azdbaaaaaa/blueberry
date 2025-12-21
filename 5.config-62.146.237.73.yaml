@@ -1,0 +1,17 @@
+youtube:
+  cookies_file: "./cookies/yt_5.txt"  # zhangtimmy28@gmail.com
+  video_limit_before_rest: 30  # 成功下载多少个视频后休息（0 表示不限制）
+  concurrent_fragments: 1  # 并发下载片段数，提高下载速度
+  sleep_interval_seconds: 30  # 睡眠间隔时间（秒）
+  
+youtube_channels:
+  - url: "https://www.youtube.com/@Qixiang-Animation/videos"
+    languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
+    limit: 1300
+    offset: 2600
+
+bilibili_accounts:
+  account5:
+    username: "Uq21VYs2qZokAY9c@gmail.com"
+    userid: "1256895712"
+    cookies_file: "./cookies/blbl_5.txt"

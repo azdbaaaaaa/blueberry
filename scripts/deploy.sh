@@ -49,7 +49,7 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
-    echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml）"
+    echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml 或 <编号>.config-<ip>.yaml）"
     echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
     echo "  uninstall - 卸载 systemd 服务"
     echo "  start    - 启动服务"
@@ -163,7 +163,30 @@ setup_ssh_for_ip() {
         SSH_OPTS="-i $SSH_KEY_PATH"
     fi
     REMOTE_HOST="${REMOTE_USER}@${ip}"
-    CONFIG_FILE="config-${ip}.yaml"
+    
+    # 查找配置文件，支持带编号的格式（如 1.config-IP.yaml）
+    # 优先级：先查找带编号的配置文件（按数字排序），如果找不到则使用默认格式
+    CONFIG_FILE=""
+    local default_config="config-${ip}.yaml"
+    
+    # 查找所有匹配 *config-${ip}.yaml 的文件
+    local found_configs=()
+    for config in *config-${ip}.yaml; do
+        if [ -f "$config" ]; then
+            found_configs+=("$config")
+        fi
+    done
+    
+    if [ ${#found_configs[@]} -gt 0 ]; then
+        # 按文件名排序（带编号的会排在前面）
+        IFS=$'\n' found_configs=($(sort <<<"${found_configs[*]}"))
+        CONFIG_FILE="${found_configs[0]}"
+        log_info "[$ip] 找到配置文件: $CONFIG_FILE"
+    elif [ -f "$default_config" ]; then
+        CONFIG_FILE="$default_config"
+    else
+        CONFIG_FILE="$default_config"  # 即使不存在也设置，用于错误提示
+    fi
 }
 
 # 远程执行函数（需要先调用 setup_ssh_for_ip）
