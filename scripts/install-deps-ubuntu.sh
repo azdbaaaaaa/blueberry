@@ -140,10 +140,62 @@ node --version
 npm --version
 
 echo ""
+echo "步骤 7/7: 配置日志查看别名..."
+# 检测用户的默认 shell
+USER_SHELL=$(getent passwd "$(whoami)" | cut -d: -f7)
+SHELL_RC=""
+
+if [ -f "$HOME/.bashrc" ]; then
+    SHELL_RC="$HOME/.bashrc"
+elif [ -f "$HOME/.zshrc" ]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [ -f "$HOME/.profile" ]; then
+    SHELL_RC="$HOME/.profile"
+else
+    # 如果都不存在，根据默认 shell 创建
+    if echo "$USER_SHELL" | grep -q "zsh"; then
+        SHELL_RC="$HOME/.zshrc"
+    else
+        SHELL_RC="$HOME/.bashrc"
+    fi
+fi
+
+# 检查别名是否已存在
+if ! grep -q "alias log1=" "$SHELL_RC" 2>/dev/null; then
+    echo "" >> "$SHELL_RC"
+    echo "# Blueberry 日志查看别名" >> "$SHELL_RC"
+    echo "alias log1='tail -f /var/log/blueberry/download.log'" >> "$SHELL_RC"
+    echo "alias log2='tail -f /var/log/blueberry/upload.log'" >> "$SHELL_RC"
+    echo "✓ 已添加日志查看别名到 $SHELL_RC"
+    echo "  使用 'source $SHELL_RC' 或重新登录后生效"
+else
+    echo "✓ 日志查看别名已存在，跳过..."
+fi
+
+echo ""
+echo "=========================================="
+echo "所有依赖安装完成！"
+echo "=========================================="
+echo ""
+echo "已安装的软件版本："
+echo "-------------------"
+$GO_INSTALL_DIR/bin/go version
+git --version
+ffmpeg -version | head -n 1
+yt-dlp --version
+node --version
+npm --version
+
+echo ""
 echo "下一步："
 echo "1. 克隆项目: git clone <repository-url>"
 echo "2. 进入项目目录: cd blueberry"
 echo "3. 构建项目: go build -o blueberry ."
 echo "4. 配置项目: cp config.yaml.example config.yaml"
+echo ""
+echo "日志查看别名："
+echo "  - log1: 查看下载服务日志 (tail -f /var/log/blueberry/download.log)"
+echo "  - log2: 查看上传服务日志 (tail -f /var/log/blueberry/upload.log)"
+echo "  使用 'source $SHELL_RC' 或重新登录后生效"
 echo ""
 
