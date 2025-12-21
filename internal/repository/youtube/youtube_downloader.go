@@ -226,13 +226,34 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 								Msg("命令执行完成")
 							goto processOutput
 						case <-ticker.C:
-							// 定期输出心跳日志
+							// 定期输出心跳日志，并检查文件大小变化
 							elapsed := time.Since(startTime)
+
+							// 检查目标文件的大小变化（用于检测是否真的在下载）
+							var currentSize int64 = 0
+							var filePath string
+							// 尝试查找视频文件（可能还在下载中，文件名可能包含 .part 或 .ytdl）
+							videoPattern := filepath.Join(videoDir, videoID+"_*.mp4*")
+							matches, _ := filepath.Glob(videoPattern)
+							if len(matches) == 0 {
+								// 如果没有找到 .mp4 文件，尝试查找 .part 文件
+								partPattern := filepath.Join(videoDir, videoID+"_*.part")
+								matches, _ = filepath.Glob(partPattern)
+							}
+							if len(matches) > 0 {
+								filePath = matches[0]
+								if info, err := os.Stat(filePath); err == nil {
+									currentSize = info.Size()
+								}
+							}
+
 							logger.Info().
 								Int("strategy_index", i+1).
 								Str("client", t.client).
 								Bool("with_cookies", t.includeCookie).
 								Dur("elapsed", elapsed).
+								Int64("file_size", currentSize).
+								Str("file_path", filePath).
 								Msg("下载进行中（心跳日志）")
 						case <-ctx.Done():
 							ticker.Stop()
