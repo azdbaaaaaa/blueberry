@@ -129,8 +129,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 					outputDone := make(chan bool, 2)
 
 					// 用于跟踪文件大小变化
-					lastFileSize := int64(0)
-					lastFileSizeTime := time.Now()
+					lastFileSize := int64(-1)          // 初始化为 -1，表示还未检测到文件
+					lastFileSizeTime := time.Time{}    // 初始化为零值，表示还未开始计时
 					fileSizeTimeout := 5 * time.Minute // 5分钟文件大小无变化则认为卡住
 					var fileSizeMutex sync.Mutex
 
@@ -161,7 +161,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 							outputBuilder.WriteString(line)
 							outputBuilder.WriteString("\n")
 							// 错误信息立即记录
-							if strings.Contains(line, "ERROR:") || strings.Contains(line, "WARNING:") {
+							if strings.Contains(line, "ERROR:") {
 								logger.Warn().
 									Int("strategy_index", i+1).
 									Str("client", t.client).
@@ -254,16 +254,24 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 									// 检查文件大小是否变化
 									fileSizeMutex.Lock()
-									if currentSize != lastFileSize {
+									if lastFileSize == -1 {
+										// 第一次检测到文件，初始化
+										lastFileSize = currentSize
+										lastFileSizeTime = time.Now()
+									} else if currentSize != lastFileSize {
 										// 文件大小有变化，更新记录
 										lastFileSize = currentSize
 										lastFileSizeTime = time.Now()
 									}
-									noSizeChangeDuration := time.Since(lastFileSizeTime)
+									// 计算文件大小无变化的时长（只有在已初始化后才计算）
+									var noSizeChangeDuration time.Duration
+									if !lastFileSizeTime.IsZero() {
+										noSizeChangeDuration = time.Since(lastFileSizeTime)
+									}
 									fileSizeMutex.Unlock()
 
-									// 检查是否超过20分钟文件大小无变化
-									if currentSize > 0 && noSizeChangeDuration > fileSizeTimeout {
+									// 检查是否超过5分钟文件大小无变化
+									if currentSize > 0 && !lastFileSizeTime.IsZero() && noSizeChangeDuration > fileSizeTimeout {
 										logger.Warn().
 											Int("strategy_index", i+1).
 											Str("client", t.client).
@@ -298,7 +306,10 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 							}
 
 							fileSizeMutex.Lock()
-							noSizeChangeDuration := time.Since(lastFileSizeTime)
+							var noSizeChangeDuration time.Duration
+							if !lastFileSizeTime.IsZero() {
+								noSizeChangeDuration = time.Since(lastFileSizeTime)
+							}
 							fileSizeMutex.Unlock()
 
 							logger.Info().
@@ -341,11 +352,22 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			Msg("开始处理命令输出")
 
 		// 检查输出中是否包含错误信息（即使 err == nil，yt-dlp 也可能在输出中报告错误）
-		hasErrorInOutput := strings.Contains(outputStr, "ERROR:") ||
-			strings.Contains(outputStr, "WARNING:") ||
-			strings.Contains(outputStr, "Sign in to confirm") ||
-			strings.Contains(outputStr, "bot detection") ||
-			strings.Contains(outputStr, "authentication")
+		// 注意：只检查以 "ERROR:" 开头的行，WARNING 不是错误
+		hasErrorInOutput := false
+		lines := strings.Split(outputStr, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "ERROR:") {
+				hasErrorInOutput = true
+				break
+			}
+		}
+		// 同时检查 bot detection 相关的关键词（这些是真正的错误）
+		if !hasErrorInOutput {
+			hasErrorInOutput = strings.Contains(outputStr, "Sign in to confirm") ||
+				strings.Contains(outputStr, "bot detection") ||
+				strings.Contains(outputStr, "authentication")
+		}
 
 		// 检查是否是认证错误（bot detection）- 使用更宽松的匹配
 		check1 := strings.Contains(outputStr, "Sign in to confirm")
@@ -447,16 +469,9 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				Err(err).
 				Msg("下载失败（检测到 bot detection），继续尝试下一种策略")
 			continue
-		} else {
-			// 记录为什么没有进入 bot detection 分支
-			logger.Debug().
-				Int("strategy_index", i+1).
-				Bool("is_bot_detection", false).
-				Bool("check_sign_in", check1).
-				Bool("check_confirm_bot", check2).
-				Bool("check_not_bot", check3).
-				Msg("未检测到 bot detection，继续处理其他错误")
 		}
+		// 注意：只有在有错误时才输出这个日志，成功的情况已经在上面返回了
+		// 如果执行到这里，说明有错误但不是 bot detection
 
 		// 其他错误，打印详细错误信息
 		// 使用 Error 级别确保错误信息被记录
