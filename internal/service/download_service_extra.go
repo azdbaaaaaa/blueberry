@@ -75,7 +75,7 @@ func (s *downloadService) DownloadChannel(ctx context.Context, channelDir string
 	}
 
 	// 检查是否在 bot detection 休息期间
-	restBase := 120 // 默认2小时 = 120分钟
+	restBase := 180 // 默认3小时 = 180分钟
 	if s.cfg != nil && s.cfg.YouTube.BotDetectionRestDuration > 0 {
 		restBase = s.cfg.YouTube.BotDetectionRestDuration
 	}
@@ -418,7 +418,7 @@ func (s *downloadService) handleBotDetection(ctx context.Context) {
 	logger.Info().Msg("开始处理 bot detection（handleBotDetection 函数被调用）")
 
 	// 获取触发阈值配置
-	threshold := 10 // 默认10次
+	threshold := 3 // 默认3次
 	if s.cfg != nil && s.cfg.YouTube.BotDetectionThreshold > 0 {
 		threshold = s.cfg.YouTube.BotDetectionThreshold
 	}
@@ -464,7 +464,7 @@ func (s *downloadService) handleBotDetection(ctx context.Context) {
 	// 达到阈值时，休息
 	if currentCount >= threshold {
 		// 获取休息时长配置
-		restBase := 120 // 默认2小时 = 120分钟
+		restBase := 180 // 默认3小时 = 180分钟
 		if s.cfg != nil && s.cfg.YouTube.BotDetectionRestDuration > 0 {
 			restBase = s.cfg.YouTube.BotDetectionRestDuration
 		}

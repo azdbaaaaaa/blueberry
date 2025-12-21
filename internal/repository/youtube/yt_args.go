@@ -26,9 +26,7 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	sleepSubtitles := 2
 	bufferSize := "1M"
 	fileAccessRetries := 5
-	socketTimeout := 30     // 默认30秒网络连接超时
-	extractorTimeout := 60  // 默认60秒提取器超时
-	downloadTimeout := 1800 // 默认30分钟下载总超时
+	socketTimeout := 30 // 默认30秒网络连接超时
 	if cfg != nil {
 		if cfg.YouTube.Retries > 0 {
 			retries = cfg.YouTube.Retries
@@ -57,12 +55,6 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		if cfg.YouTube.SocketTimeout > 0 {
 			socketTimeout = cfg.YouTube.SocketTimeout
 		}
-		if cfg.YouTube.ExtractorTimeout > 0 {
-			extractorTimeout = cfg.YouTube.ExtractorTimeout
-		}
-		if cfg.YouTube.DownloadTimeout > 0 {
-			downloadTimeout = cfg.YouTube.DownloadTimeout
-		}
 	}
 	// 为 sleep interval 添加 0%-50% 的随机变化
 	// 使用当前时间作为随机种子，确保每次调用都有不同的随机值
@@ -81,8 +73,6 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		"--buffer-size", bufferSize,
 		"--file-access-retries", strconv.Itoa(fileAccessRetries),
 		"--socket-timeout", strconv.Itoa(socketTimeout),
-		"--extractor-timeout", strconv.Itoa(extractorTimeout),
-		"--download-timeout", strconv.Itoa(downloadTimeout),
 	}
 	// 添加限速参数（如果配置了）
 	if cfg != nil && cfg.YouTube.LimitRate != "" {

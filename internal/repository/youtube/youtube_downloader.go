@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"blueberry/internal/config"
@@ -126,6 +127,12 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 					// 实时读取输出
 					var outputBuilder strings.Builder
 					outputDone := make(chan bool, 2)
+
+					// 用于跟踪文件大小变化
+					lastFileSize := int64(0)
+					lastFileSizeTime := time.Now()
+					fileSizeTimeout := 5 * time.Minute // 5分钟文件大小无变化则认为卡住
+					var fileSizeMutex sync.Mutex
 
 					// 读取 stdout
 					go func() {
@@ -244,8 +251,55 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 								filePath = matches[0]
 								if info, err := os.Stat(filePath); err == nil {
 									currentSize = info.Size()
+
+									// 检查文件大小是否变化
+									fileSizeMutex.Lock()
+									if currentSize != lastFileSize {
+										// 文件大小有变化，更新记录
+										lastFileSize = currentSize
+										lastFileSizeTime = time.Now()
+									}
+									noSizeChangeDuration := time.Since(lastFileSizeTime)
+									fileSizeMutex.Unlock()
+
+									// 检查是否超过20分钟文件大小无变化
+									if currentSize > 0 && noSizeChangeDuration > fileSizeTimeout {
+										logger.Warn().
+											Int("strategy_index", i+1).
+											Str("client", t.client).
+											Bool("with_cookies", t.includeCookie).
+											Dur("elapsed", elapsed).
+											Int64("file_size", currentSize).
+											Dur("no_size_change_duration", noSizeChangeDuration).
+											Dur("file_size_timeout", fileSizeTimeout).
+											Msg("检测到文件大小长时间无变化，可能已卡住，将终止并尝试下一个策略")
+										// 终止当前命令
+										if cmd.Process != nil {
+											cmd.Process.Kill()
+										}
+										// 等待进程结束
+										<-cmdDone
+										// 设置错误并继续到下一个策略
+										err = fmt.Errorf("文件大小无变化超时（%v 文件大小未变化）", noSizeChangeDuration)
+										outputStr = outputBuilder.String()
+										lastErr = err
+										lastOutput = outputStr
+										logger.Error().
+											Int("strategy_index", i+1).
+											Str("client", t.client).
+											Bool("with_cookies", t.includeCookie).
+											Int64("file_size", currentSize).
+											Dur("no_size_change_duration", noSizeChangeDuration).
+											Err(err).
+											Msg("下载失败（文件大小无变化超时），继续尝试下一种策略")
+										goto processOutput
+									}
 								}
 							}
+
+							fileSizeMutex.Lock()
+							noSizeChangeDuration := time.Since(lastFileSizeTime)
+							fileSizeMutex.Unlock()
 
 							logger.Info().
 								Int("strategy_index", i+1).
@@ -254,6 +308,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 								Dur("elapsed", elapsed).
 								Int64("file_size", currentSize).
 								Str("file_path", filePath).
+								Dur("no_size_change_duration", noSizeChangeDuration).
 								Msg("下载进行中（心跳日志）")
 						case <-ctx.Done():
 							ticker.Stop()
