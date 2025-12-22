@@ -51,7 +51,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action> [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
     echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml 或 <编号>.config-<ip>.yaml）"
     echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
@@ -64,6 +64,7 @@ if [ $# -lt 1 ]; then
     echo "  disable  - 禁用服务自启动"
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
+    echo "  sync     - 同步远程服务器的 output 目录到本地"
     echo ""
     echo "Service types: download, upload, both (默认: both)"
     echo ""
@@ -486,6 +487,37 @@ with open('$counters_file', 'w') as f:
     return 0
 }
 
+# 同步 output 目录（针对单个 IP）
+sync_output_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "同步远程 output 目录到本地..."
+    
+    local remote_output_dir="$REMOTE_DIR/output"
+    local local_output_dir="$PROJECT_DIR/output"
+    
+    # 创建本地目录（如果不存在）
+    mkdir -p "$local_output_dir"
+    
+    # 检查远程目录是否存在
+    if ! remote_exec "test -d $remote_output_dir"; then
+        log_warn "[$ip] 远程 output 目录不存在: $remote_output_dir，跳过同步"
+        return 0
+    fi
+    
+    log_ip "$ip" "从 $REMOTE_HOST:$remote_output_dir/ 同步到 $local_output_dir/"
+    
+    # 使用 rsync 同步（从远程到本地）
+    if rsync -azP -e "ssh $SSH_OPTS" "$REMOTE_HOST:$remote_output_dir/" "$local_output_dir/"; then
+        log_ip "$ip" "✓ output 目录同步完成"
+        return 0
+    else
+        log_error "[$ip] output 目录同步失败"
+        return 1
+    fi
+}
+
 # 处理所有 IP 的主函数
 process_all_ips() {
     local action=$1
@@ -600,6 +632,14 @@ process_all_ips() {
                 ;;
             reset)
                 if reset_counters_for_ip "$ip"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                    failed_ips+=("$ip")
+                fi
+                ;;
+            sync)
+                if sync_output_for_ip "$ip"; then
                     ((success_count++))
                 else
                     ((fail_count++))
