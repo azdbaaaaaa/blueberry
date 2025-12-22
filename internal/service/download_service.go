@@ -360,6 +360,11 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 		Int("limit", limit).
 		Msg("频道信息已保存（已应用 limit/offset）")
 
+	// 清理不在同步范围内的、未下载的视频目录
+	if err := s.cleanupOutOfRangeVideoDirs(realChannelID, videoMaps); err != nil {
+		logger.Warn().Err(err).Msg("清理不在同步范围内的视频目录时出错，继续执行")
+	}
+
 	// 可选：生成待下载状态文件（可能较慢）
 	if s.cfg.Channel.GeneratePendingDownloads {
 		languages := s.getChannelLanguages(channel)
@@ -375,6 +380,108 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 		}
 	} else {
 		logger.Info().Str("channel_id", realChannelID).Msg("按配置跳过生成待下载状态文件")
+	}
+
+	return nil
+}
+
+// cleanupOutOfRangeVideoDirs 清理不在同步范围内的、未下载的视频目录
+func (s *downloadService) cleanupOutOfRangeVideoDirs(channelID string, selectedVideoMaps []map[string]interface{}) error {
+	// 构建 selectedVideoIDs 集合，用于快速查找
+	selectedVideoIDs := make(map[string]bool)
+	for _, videoMap := range selectedVideoMaps {
+		if videoID, ok := videoMap["id"].(string); ok && videoID != "" {
+			selectedVideoIDs[videoID] = true
+		}
+	}
+
+	// 获取频道目录
+	channelDir, err := s.fileManager.EnsureChannelDir(channelID)
+	if err != nil {
+		return fmt.Errorf("获取频道目录失败: %w", err)
+	}
+
+	// 扫描频道目录下的所有子目录
+	entries, err := os.ReadDir(channelDir)
+	if err != nil {
+		return fmt.Errorf("读取频道目录失败: %w", err)
+	}
+
+	deletedCount := 0
+	skippedCount := 0
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		dirName := entry.Name()
+		// 跳过特殊目录
+		if dirName == ".global" {
+			continue
+		}
+
+		videoDir := filepath.Join(channelDir, dirName)
+
+		// 尝试从 video_info.json 中获取 videoID
+		videoInfoPath := filepath.Join(videoDir, "video_info.json")
+		var videoID string
+		if data, err := os.ReadFile(videoInfoPath); err == nil {
+			var videoInfo map[string]interface{}
+			if err := json.Unmarshal(data, &videoInfo); err == nil {
+				if id, ok := videoInfo["id"].(string); ok {
+					videoID = id
+				}
+			}
+		}
+
+		// 如果无法从 video_info.json 获取，尝试使用目录名作为 videoID
+		if videoID == "" {
+			videoID = dirName
+		}
+
+		// 检查是否在 selectedVideoIDs 中
+		if selectedVideoIDs[videoID] {
+			// 在同步范围内，跳过
+			continue
+		}
+
+		// 不在同步范围内，检查是否已下载
+		if s.fileManager.IsVideoDownloaded(videoDir) {
+			// 已下载，保留目录
+			logger.Debug().
+				Str("channel_id", channelID).
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Msg("视频已下载，保留目录（不在同步范围内）")
+			skippedCount++
+			continue
+		}
+
+		// 未下载，删除目录
+		logger.Info().
+			Str("channel_id", channelID).
+			Str("video_id", videoID).
+			Str("video_dir", videoDir).
+			Msg("删除不在同步范围内且未下载的视频目录")
+		if err := os.RemoveAll(videoDir); err != nil {
+			logger.Warn().
+				Str("channel_id", channelID).
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Err(err).
+				Msg("删除视频目录失败")
+			continue
+		}
+		deletedCount++
+	}
+
+	if deletedCount > 0 || skippedCount > 0 {
+		logger.Info().
+			Str("channel_id", channelID).
+			Int("deleted_count", deletedCount).
+			Int("skipped_count", skippedCount).
+			Msg("清理完成：删除不在同步范围内且未下载的视频目录")
 	}
 
 	return nil
