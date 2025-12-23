@@ -12,6 +12,8 @@ cookies.txt
 *.cookies
 cookies/
 output/
+output-*/
+output-*.zip
 
 # 编译产物
 blueberry
