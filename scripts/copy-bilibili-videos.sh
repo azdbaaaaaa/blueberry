@@ -27,30 +27,82 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_debug() { echo -e "${BLUE}[DEBUG]${NC} $1"; }
 
-# 检查参数
-if [ $# -lt 1 ]; then
-    log_error "参数不足"
-    echo "用法: $0 <cookies_file> [output_dir] [dist_dir]"
+# 显示用法（如果需要）
+show_usage() {
+    echo "用法: $0 [cookies_file] [output_dir] [dist_dir]"
     echo ""
     echo "参数说明:"
-    echo "  cookies_file: Bilibili cookies 文件路径（Netscape 格式，例如: cookies/blbl_1.txt）"
+    echo "  cookies_file: Bilibili cookies 文件路径（Netscape 格式，可选）"
+    echo "                如果不提供，将自动扫描 cookies/blbl_*.txt 文件并逐个处理"
     echo "  output_dir:   输出目录路径（默认: ./output）"
     echo "  dist_dir:     目标目录路径（默认: ./dist）"
     echo ""
     echo "示例:"
-    echo "  $0 cookies/blbl_1.txt"
+    echo "  $0                                    # 自动处理所有 cookies/blbl_*.txt 文件"
+    echo "  $0 cookies/blbl_1.txt                # 处理指定的 cookies 文件"
     echo "  $0 cookies/blbl_1.txt ./output ./dist"
-    exit 1
+}
+
+# 解析参数
+COOKIES_FILE=""
+OUTPUT_DIR="$OUTPUT_DIR"
+DIST_DIR="$DIST_DIR"
+
+# 解析参数（支持 --help）
+if [ $# -ge 1 ]; then
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+        show_usage
+        exit 0
+    fi
+    
+    first_arg="$1"
+    # 检查是否是 cookies 文件（以 cookies/ 开头或以 .txt 结尾，或者是存在的文件）
+    if [[ "$first_arg" == cookies/* ]] || [[ "$first_arg" == *.txt ]] || [ -f "$first_arg" ]; then
+        COOKIES_FILE="$first_arg"
+        shift
+        if [ $# -ge 1 ]; then
+            OUTPUT_DIR="$1"
+            shift
+        fi
+        if [ $# -ge 1 ]; then
+            DIST_DIR="$1"
+        fi
+    else
+        # 第一个参数可能是 output_dir
+        OUTPUT_DIR="$first_arg"
+        shift
+        if [ $# -ge 1 ]; then
+            DIST_DIR="$1"
+        fi
+    fi
 fi
 
-COOKIES_FILE="$1"
-OUTPUT_DIR="${2:-$OUTPUT_DIR}"
-DIST_DIR="${3:-$DIST_DIR}"
-
-# 检查 cookies 文件是否存在
-if [ ! -f "$COOKIES_FILE" ]; then
-    log_error "Cookies 文件不存在: $COOKIES_FILE"
-    exit 1
+# 如果没有指定 cookies 文件，扫描 cookies/blbl_*.txt
+COOKIES_FILES=()
+if [ -z "$COOKIES_FILE" ]; then
+    log_info "未指定 cookies 文件，扫描 cookies/blbl_*.txt 文件..."
+    while IFS= read -r -d '' file; do
+        if [ -f "$file" ]; then
+            COOKIES_FILES+=("$file")
+        fi
+    done < <(find "$COOKIES_DIR" -maxdepth 1 -name "blbl_*.txt" -type f -print0 2>/dev/null | sort -z)
+    
+    if [ ${#COOKIES_FILES[@]} -eq 0 ]; then
+        log_error "未找到任何 cookies/blbl_*.txt 文件"
+        exit 1
+    fi
+    
+    log_info "找到 ${#COOKIES_FILES[@]} 个 cookies 文件"
+    for file in "${COOKIES_FILES[@]}"; do
+        log_info "  - $file"
+    done
+else
+    # 检查指定的 cookies 文件是否存在
+    if [ ! -f "$COOKIES_FILE" ]; then
+        log_error "Cookies 文件不存在: $COOKIES_FILE"
+        exit 1
+    fi
+    COOKIES_FILES=("$COOKIES_FILE")
 fi
 
 # 检查 output 目录是否存在
@@ -338,20 +390,27 @@ except:
     echo "TOTAL_COUNT:${#all_aids[@]}" >&2
 }
 
-# 主流程
-main() {
+# 处理单个 cookies 文件
+process_cookies_file() {
+    local cookies_file="$1"
+    
+    echo ""
+    log_info "=========================================="
+    log_info "处理 cookies 文件: $cookies_file"
+    log_info "=========================================="
+    
     # 1. 从 cookies 文件读取 cookies
     log_info "从 cookies 文件读取 cookies..."
     
     # 显示 cookies 信息（用于日志）
-    show_cookies_info "$COOKIES_FILE"
+    show_cookies_info "$cookies_file"
     
     # 获取 cookies 字符串（只输出到 stdout，格式：name1=value1; name2=value2）
-    COOKIES=$(extract_cookies_from_file "$COOKIES_FILE")
+    COOKIES=$(extract_cookies_from_file "$cookies_file")
     
     if [ -z "$COOKIES" ]; then
-        log_error "无法从 cookies 文件读取 cookies"
-        exit 1
+        log_error "无法从 cookies 文件读取 cookies: $cookies_file"
+        return 1
     fi
     
     log_info "Cookies 读取成功"
@@ -379,7 +438,7 @@ main() {
         log_warn "未找到任何视频 aid"
         log_info "获取到的原始数据（前20行）:"
         echo "$AID_LIST_STDOUT" | head -20
-        exit 0
+        return 0
     fi
     
     log_info "找到 $AID_COUNT 个视频 aid"
@@ -422,11 +481,45 @@ main() {
     done <<< "$AID_LIST"
     
     echo ""
-    log_info "复制完成！"
+    log_info "处理完成: $cookies_file"
     log_info "成功复制: $copied 个文件夹"
     if [ "$not_found" -gt 0 ]; then
         log_warn "未找到: $not_found 个文件夹（在 output 目录中不存在）"
     fi
+    
+    return 0
+}
+
+# 主流程
+main() {
+    # 创建 dist 目录（如果不存在）
+    mkdir -p "$DIST_DIR"
+    
+    # 遍历所有 cookies 文件
+    total_files=${#COOKIES_FILES[@]}
+    current_file=0
+    
+    for cookies_file in "${COOKIES_FILES[@]}"; do
+        current_file=$((current_file + 1))
+        log_info "[$current_file/$total_files] 处理 cookies 文件: $cookies_file"
+        
+        if ! process_cookies_file "$cookies_file"; then
+            log_error "处理 cookies 文件失败: $cookies_file，继续处理下一个"
+            continue
+        fi
+        
+        # 在处理多个文件时，添加分隔
+        if [ $current_file -lt $total_files ]; then
+            echo ""
+            log_info "等待 2 秒后处理下一个文件..."
+            sleep 2
+        fi
+    done
+    
+    echo ""
+    log_info "=========================================="
+    log_info "所有 cookies 文件处理完成！"
+    log_info "=========================================="
 }
 
 # 执行主流程

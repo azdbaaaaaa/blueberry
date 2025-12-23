@@ -105,7 +105,7 @@ type YouTubeConfig struct {
 	VideoLimitRestDuration int `mapstructure:"video_limit_rest_duration"`
 	// BotDetectionThreshold 机器人检测累计多少次后触发休息（默认 3 次）
 	BotDetectionThreshold int `mapstructure:"bot_detection_threshold"`
-	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 3 小时（180分钟），实际休息时间会在此基础上随机增加 0-10%
+	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 6 小时（360分钟），实际休息时间会在此基础上随机增加 0-10%
 	BotDetectionRestDuration int `mapstructure:"bot_detection_rest_duration"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
@@ -173,7 +173,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetDefault("youtube.video_limit_before_rest", 40)
 	viper.SetDefault("youtube.video_limit_rest_duration", 60)    // 1小时 = 60分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("youtube.bot_detection_threshold", 3)       // 机器人检测累计3次后触发休息
-	viper.SetDefault("youtube.bot_detection_rest_duration", 180) // 3小时 = 180分钟，实际休息时间会在此基础上随机增加 0-10%
+	viper.SetDefault("youtube.bot_detection_rest_duration", 360) // 6小时 = 360分钟，实际休息时间会在此基础上随机增加 0-10%
 	viper.SetDefault("output.directory", "./downloads")
 	viper.SetDefault("output.subtitle_archive", "./output")
 
@@ -212,7 +212,7 @@ func Load(configPath string) (*Config, error) {
 		config.YouTube.BotDetectionThreshold = 3 // 使用默认值
 	}
 	if config.YouTube.BotDetectionRestDuration == 0 {
-		config.YouTube.BotDetectionRestDuration = 180 // 使用默认值
+		config.YouTube.BotDetectionRestDuration = 360 // 使用默认值
 	}
 	if config.YouTube.SleepIntervalSeconds == 0 {
 		config.YouTube.SleepIntervalSeconds = 30 // 使用默认值

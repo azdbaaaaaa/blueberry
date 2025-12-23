@@ -14,25 +14,6 @@ BIN_NAME="blueberry"
 BIN_DIR="$PROJECT_DIR/bin"
 BIN="$BIN_DIR/$BIN_NAME"
 
-# 默认 IP 列表（如果未提供 IP 参数，将使用此列表）
-# 可以通过环境变量 DEPLOY_DEFAULT_IPS 覆盖，格式：IP1 IP2 IP3
-DEFAULT_IPS=(
-    # 在这里添加默认的服务器 IP
-    "46.250.231.34"
-    "194.233.83.29"
-    "84.247.145.180"
-    "62.146.237.73"
-    "154.26.136.193"
-    "217.15.162.210"
-    "82.197.70.203"
-    "62.146.235.174"
-    "194.233.71.173"
-)
-
-# 如果设置了环境变量，使用环境变量的值
-if [ -n "$DEPLOY_DEFAULT_IPS" ]; then
-    read -ra DEFAULT_IPS <<< "$DEPLOY_DEFAULT_IPS"
-fi
 
 # 颜色输出
 GREEN='\033[0;32m'
@@ -49,9 +30,11 @@ log_ip() { echo -e "${BLUE}[$1]${NC} $2"; }
 # 检查参数
 if [ $# -lt 1 ]; then
     log_error "参数不足"
-    echo "用法: $0 <action> [ip1] [ip2] [ip3] ... [service_type] [--init]"
+    echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
     echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync"
+    echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
+    echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
     echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml 或 <编号>.config-<ip>.yaml）"
     echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
@@ -69,55 +52,136 @@ if [ $# -lt 1 ]; then
     echo "Service types: download, upload, both (默认: both)"
     echo ""
     echo "IP 参数:"
-    echo "  - 如果未提供 IP，将使用脚本中配置的默认 IP 列表"
-    echo "  - 可以通过环境变量 DEPLOY_DEFAULT_IPS 覆盖默认列表"
+    echo "  - 可以指定 IP 地址（如: 66.42.63.131）"
+    echo "  - 可以指定编号（如: 1, 2, 3），脚本会自动查找对应的配置文件（如: 1.config-IP.yaml）"
+    echo "  - 如果未提供 IP，将自动查找所有编号配置文件（[0-9]*.config-*.yaml）并提取 IP"
+    echo "  - 支持逗号分隔的多个 IP 或编号（如: 1,2,3 或 66.42.63.131,194.233.83.29）"
     echo ""
     echo "示例:"
     echo "  $0 prepare 66.42.63.131"
+    echo "  $0 install 1,2,3                    # 使用编号 1, 2, 3"
+    echo "  $0 install reset restart 1          # 连续执行多个操作"
+    echo "  $0 install reset restart 1,2,3      # 对多个服务器连续执行操作"
+    echo "  $0 install 1,194.233.83.29          # 混合使用编号和 IP"
     echo "  $0 install 66.42.63.131,194.233.83.29"
-    echo "  $0 install 66.42.63.131,194.233.83.29,46.250.231.34 --init"
-    echo "  $0 start 66.42.63.131 download"
-    echo "  $0 restart 66.42.63.131,194.233.83.29 upload"
-    echo "  $0 start  # 使用默认 IP 列表"
-    echo "  DEPLOY_DEFAULT_IPS='66.42.63.131 194.233.83.29' $0 start"
+    echo "  $0 install 1,2,3 --init              # 使用编号并初始化"
+    echo "  $0 start 1 download                 # 使用编号 1"
+    echo "  $0 restart 1,2 upload                # 使用编号 1, 2"
+    echo "  $0 start  # 自动查找所有配置文件"
     exit 1
 fi
 
-ACTION=$1
-shift  # 移除 ACTION
+# 解析 ACTION 列表（支持多个操作）
+ACTIONS=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync)
+            ACTIONS+=("$1")
+            shift
+            ;;
+        --init|download|upload|both|*)
+            # 遇到非 ACTION 参数，停止解析 ACTION
+            break
+            ;;
+    esac
+done
+
+# 如果没有找到任何 ACTION，报错
+if [ ${#ACTIONS[@]} -eq 0 ]; then
+    log_error "未指定任何操作"
+    exit 1
+fi
 
 # 解析参数：提取 IP 列表、--init 选项和 service_type
 IPS=()
 INIT_AFTER_INSTALL=false
 SERVICE_TYPE="both"
 
-# 解析单个 IP 或逗号分隔的 IP 列表
+# 根据编号查找配置文件并提取 IP
+find_ip_by_number() {
+    local number=$1
+    local config_pattern="${number}.config-*.yaml"
+    local found_configs=()
+    
+    # 查找匹配的配置文件
+    for config in $config_pattern; do
+        if [ -f "$config" ]; then
+            found_configs+=("$config")
+        fi
+    done
+    
+    if [ ${#found_configs[@]} -eq 0 ]; then
+        log_error "未找到编号为 $number 的配置文件（${number}.config-*.yaml）" >&2
+        return 1
+    fi
+    
+    if [ ${#found_configs[@]} -gt 1 ]; then
+        log_warn "找到多个匹配的配置文件，使用第一个: ${found_configs[0]}" >&2
+    fi
+    
+    # 从配置文件名中提取 IP
+    # 格式: <编号>.config-<IP>.yaml
+    local config_file="${found_configs[0]}"
+    # 使用更兼容的 sed 正则表达式
+    local ip=$(echo "$config_file" | sed -n 's/^[0-9][0-9]*\.config-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\.yaml$/\1/p')
+    
+    if [ -z "$ip" ]; then
+        log_error "无法从配置文件名中提取 IP: $config_file" >&2
+        return 1
+    fi
+    
+    log_info "编号 $number 对应配置文件: $config_file (IP: $ip)" >&2
+    echo "$ip"  # 只输出 IP 到 stdout
+    return 0
+}
+
+# 解析单个 IP、编号或逗号分隔的 IP/编号列表
 parse_ips() {
     local input=$1
     # 如果包含逗号，按逗号分割
     if [[ $input == *","* ]]; then
-        IFS=',' read -ra IP_ARRAY <<< "$input"
-        for ip in "${IP_ARRAY[@]}"; do
-            ip=$(echo "$ip" | xargs)  # 去除首尾空格
-            if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                IPS+=("$ip")
+        IFS=',' read -ra ITEM_ARRAY <<< "$input"
+        for item in "${ITEM_ARRAY[@]}"; do
+            item=$(echo "$item" | xargs)  # 去除首尾空格
+            
+            # 检查是否是 IP 地址
+            if [[ $item =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                IPS+=("$item")
+            # 检查是否是纯数字（编号）
+            elif [[ $item =~ ^[0-9]+$ ]]; then
+                local ip=$(find_ip_by_number "$item")
+                if [ $? -eq 0 ] && [ -n "$ip" ]; then
+                    IPS+=("$ip")
+                else
+                    return 1
+                fi
             else
-                log_error "无效的 IP 地址: $ip"
+                log_error "无效的 IP 地址或编号: $item"
                 return 1
             fi
         done
     else
-        # 单个 IP
+        # 单个 IP 或编号
+        # 检查是否是 IP 地址
         if [[ $input =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             IPS+=("$input")
+        # 检查是否是纯数字（编号）
+        elif [[ $input =~ ^[0-9]+$ ]]; then
+            local ip=$(find_ip_by_number "$input")
+            if [ $? -eq 0 ] && [ -n "$ip" ]; then
+                IPS+=("$ip")
+            else
+                return 1
+            fi
         else
-            log_error "无效的 IP 地址: $input"
+            log_error "无效的 IP 地址或编号: $input"
             return 1
         fi
     fi
     return 0
 }
 
+# 继续解析剩余参数（IP、service_type、--init）
 while [ $# -gt 0 ]; do
     case $1 in
         --init)
@@ -138,15 +202,37 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 如果没有提供 IP，使用默认 IP 列表
+# 如果没有提供 IP，自动查找所有编号配置文件
 if [ ${#IPS[@]} -eq 0 ]; then
-    if [ ${#DEFAULT_IPS[@]} -eq 0 ]; then
-        log_error "未提供 IP 地址，且未配置默认 IP 列表"
-        log_error "请在脚本中配置 DEFAULT_IPS 或通过环境变量 DEPLOY_DEFAULT_IPS 设置"
+    log_info "未指定 IP，自动查找所有编号配置文件..."
+    cd "$PROJECT_DIR"
+    found_configs=()
+    for config in [0-9]*.config-*.yaml; do
+        if [ -f "$config" ]; then
+            found_configs+=("$config")
+        fi
+    done
+    
+    if [ ${#found_configs[@]} -eq 0 ]; then
+        log_error "未提供 IP 地址，且未找到任何编号配置文件（[0-9]*.config-*.yaml）"
+        log_error "请执行以下操作之一："
+        log_error "  1. 指定 IP 地址或编号（如: $0 install 1,2,3）"
+        log_error "  2. 创建编号配置文件（如: 1.config-IP.yaml）"
         exit 1
+    else
+        # 从配置文件中提取 IP
+        log_info "找到 ${#found_configs[@]} 个配置文件"
+        for config_file in "${found_configs[@]}"; do
+            # 从配置文件名中提取 IP（格式: <编号>.config-<IP>.yaml）
+            ip=$(echo "$config_file" | sed -n 's/^[0-9][0-9]*\.config-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\.yaml$/\1/p')
+            if [ -n "$ip" ]; then
+                IPS+=("$ip")
+            fi
+        done
+        # 去重并排序
+        IFS=$'\n' IPS=($(printf '%s\n' "${IPS[@]}" | sort -u))
+        log_info "从配置文件中提取到 ${#IPS[@]} 个 IP: ${IPS[*]}"
     fi
-    log_info "使用默认 IP 列表: ${DEFAULT_IPS[*]}"
-    IPS=("${DEFAULT_IPS[@]}")
 fi
 
 # 验证 IP 格式的函数
@@ -625,10 +711,11 @@ process_all_ips() {
                 # logs 命令只支持单个 IP
                 if [ ${#IPS[@]} -gt 1 ]; then
                     log_error "logs 命令仅支持单个 IP，请指定一个 IP 地址"
-                    exit 1
+                    return 1
                 fi
                 logs_service_for_ip "$ip"
-                exit 0
+                # logs 命令会持续运行，不会返回
+                return 0
                 ;;
             reset)
                 if reset_counters_for_ip "$ip"; then
@@ -663,9 +750,50 @@ process_all_ips() {
     if [ $fail_count -gt 0 ]; then
         log_error "失败: $fail_count 个服务器"
         log_error "失败的服务器: ${failed_ips[*]}"
-        exit 1
+        return 1
     fi
+    return 0
 }
 
-# 执行操作
-process_all_ips "$ACTION"
+# 执行操作（支持多个 ACTION）
+log_info "将执行以下操作: ${ACTIONS[*]}"
+echo ""
+
+failed_actions=()
+for action_index in "${!ACTIONS[@]}"; do
+    ACTION="${ACTIONS[$action_index]}"
+    action_num=$((action_index + 1))
+    total_actions=${#ACTIONS[@]}
+    
+    echo "========================================"
+    log_info "执行操作 [$action_num/$total_actions]: $ACTION"
+    echo "========================================"
+    echo ""
+    
+    # 对于 logs 命令，如果是在多个操作中，给出警告
+    if [ "$ACTION" = "logs" ] && [ ${#ACTIONS[@]} -gt 1 ]; then
+        log_warn "logs 命令在多个操作中可能不会按预期工作，建议单独执行"
+    fi
+    
+    # 执行操作并捕获退出码
+    if process_all_ips "$ACTION"; then
+        log_info "操作 '$ACTION' 执行成功"
+    else
+        log_error "操作 '$ACTION' 执行失败"
+        failed_actions+=("$ACTION")
+    fi
+    
+    echo ""
+done
+
+# 输出最终总结
+echo "========================================"
+log_info "所有操作执行完成"
+echo "========================================"
+if [ ${#failed_actions[@]} -gt 0 ]; then
+    log_error "失败的操作: ${failed_actions[*]}"
+    exit 1
+else
+    log_info "所有操作执行成功"
+    exit 0
+fi
