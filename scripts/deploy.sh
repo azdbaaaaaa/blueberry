@@ -32,7 +32,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize"
     echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
     echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -47,7 +47,8 @@ if [ $# -lt 1 ]; then
     echo "  disable  - 禁用服务自启动"
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
-    echo "  sync     - 同步远程服务器的 output 目录到本地"
+    echo "  sync     - 同步远程服务器的 output 目录到本地，并收集网卡流量详细信息"
+    echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
     echo ""
     echo "Service types: download, upload, both (默认: both)"
     echo ""
@@ -75,7 +76,7 @@ fi
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize)
             ACTIONS+=("$1")
             shift
             ;;
@@ -573,6 +574,256 @@ with open('$counters_file', 'w') as f:
     return 0
 }
 
+# 收集网卡流量信息（针对单个 IP）
+collect_network_stats_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "收集网卡流量信息..."
+    
+    # 使用 /proc/net/dev 获取网卡流量统计
+    # 格式：interface | receive_bytes | receive_packets | ... | transmit_bytes | transmit_packets | ...
+    local network_stats=$(remote_exec "cat /proc/net/dev 2>/dev/null" 2>&1)
+    
+    if [ -z "$network_stats" ]; then
+        log_warn "[$ip] 无法获取网卡流量信息"
+        echo "=== 服务器: $ip ===" >> "$NETWORK_STATS_DETAIL_FILE"
+        echo "错误: 无法获取网卡流量信息" >> "$NETWORK_STATS_DETAIL_FILE"
+        echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+        return 1
+    fi
+    
+    # 保存原始输出到详细文件
+    echo "=== 服务器: $ip ===" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "收集时间: $(date '+%Y-%m-%d %H:%M:%S')" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "原始输出 (/proc/net/dev):" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "$network_stats" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    
+    # 解析并计算总流量
+    local total_rx_bytes=0
+    local total_tx_bytes=0
+    local interface_count=0
+    
+    while IFS= read -r line; do
+        # 跳过标题行和空行
+        if [[ "$line" =~ ^[[:space:]]*Inter- ]] || [[ "$line" =~ ^[[:space:]]*face ]] || [[ -z "$line" ]]; then
+            continue
+        fi
+        
+        # 解析行：interface | rx_bytes rx_packets ... | tx_bytes tx_packets ...
+        # /proc/net/dev 格式：interface: rx_bytes rx_packets rx_errs rx_drop ... tx_bytes tx_packets ...
+        if [[ "$line" =~ ^[[:space:]]*([^:]+):[[:space:]]+([0-9]+)[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+([0-9]+) ]]; then
+            local interface="${BASH_REMATCH[1]}"
+            local rx_bytes="${BASH_REMATCH[2]}"
+            local tx_bytes="${BASH_REMATCH[3]}"
+            
+            # 跳过 lo (loopback) 接口
+            if [[ "$interface" == "lo" ]]; then
+                continue
+            fi
+            
+            total_rx_bytes=$((total_rx_bytes + rx_bytes))
+            total_tx_bytes=$((total_tx_bytes + tx_bytes))
+            ((interface_count++))
+        fi
+    done <<< "$network_stats"
+    
+    # 格式化输出
+    local rx_gb=$(echo "scale=2; $total_rx_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local tx_gb=$(echo "scale=2; $total_tx_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local rx_tb=$(echo "scale=2; $total_rx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
+    local tx_tb=$(echo "scale=2; $total_tx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
+    
+    echo "统计信息:" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "  网卡数量: $interface_count" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "  总接收流量: $(printf "%'d" $total_rx_bytes) 字节 ($rx_gb GB / $rx_tb TB)" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "  总发送流量: $(printf "%'d" $total_tx_bytes) 字节 ($tx_gb GB / $tx_tb TB)" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "  总流量: $(printf "%'d" $((total_rx_bytes + total_tx_bytes))) 字节 ($(echo "scale=2; ($total_rx_bytes + $total_tx_bytes) / 1073741824" | bc 2>/dev/null || echo "0") GB)" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "========================================" >> "$NETWORK_STATS_DETAIL_FILE"
+    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    
+    # 返回统计信息（用于汇总）- 输出到 stdout
+    echo "$ip|$total_rx_bytes|$total_tx_bytes|$interface_count"
+    
+    log_ip "$ip" "✓ 网卡流量信息收集完成" >&2
+    return 0
+}
+
+# 生成流量汇总统计
+generate_network_stats_summary() {
+    log_info "生成流量汇总统计..."
+    
+    local date_str=$(date +%Y%m%d)
+    local detail_file="$PROJECT_DIR/output/1.network_stats_detail_${date_str}.txt"
+    local summary_file="$PROJECT_DIR/output/1.network_stats_summary_${date_str}.txt"
+    
+    if [ ! -f "$detail_file" ]; then
+        log_error "详细统计文件不存在: $detail_file"
+        return 1
+    fi
+    
+    # 使用 Python 解析详细文件，提取统计信息
+    local stats_data=$(python3 <<EOF
+import json
+import re
+import sys
+
+detail_file = "$detail_file"
+try:
+    total_rx_bytes = 0
+    total_tx_bytes = 0
+    total_interfaces = 0
+    server_count = 0
+    
+    with open(detail_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # 查找所有 "总接收流量: X 字节" 模式
+    rx_pattern = r'总接收流量:\s+([0-9,]+)\s+字节'
+    tx_pattern = r'总发送流量:\s+([0-9,]+)\s+字节'
+    interface_pattern = r'网卡数量:\s+([0-9]+)'
+    server_pattern = r'^===.*服务器:'
+    
+    # 统计服务器数量
+    server_matches = re.findall(server_pattern, content, re.MULTILINE)
+    server_count = len(server_matches)
+    
+    # 提取所有接收流量
+    rx_matches = re.findall(rx_pattern, content)
+    for rx_str in rx_matches:
+        rx_bytes = int(rx_str.replace(',', ''))
+        total_rx_bytes += rx_bytes
+    
+    # 提取所有发送流量
+    tx_matches = re.findall(tx_pattern, content)
+    for tx_str in tx_matches:
+        tx_bytes = int(tx_str.replace(',', ''))
+        total_tx_bytes += tx_bytes
+    
+    # 提取所有网卡数量
+    interface_matches = re.findall(interface_pattern, content)
+    for if_count in interface_matches:
+        total_interfaces += int(if_count)
+    
+    # 输出 JSON 格式
+    result = {
+        "server_count": server_count,
+        "total_rx_bytes": total_rx_bytes,
+        "total_tx_bytes": total_tx_bytes,
+        "total_interfaces": total_interfaces
+    }
+    print(json.dumps(result))
+    
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+    )
+    
+    if [ $? -ne 0 ] || [ -z "$stats_data" ]; then
+        log_error "解析详细统计文件失败"
+        return 1
+    fi
+    
+    # 解析 JSON 数据
+    local server_count=$(echo "$stats_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['server_count'])" 2>/dev/null)
+    local total_rx_bytes=$(echo "$stats_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['total_rx_bytes'])" 2>/dev/null)
+    local total_tx_bytes=$(echo "$stats_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['total_tx_bytes'])" 2>/dev/null)
+    local total_interfaces=$(echo "$stats_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['total_interfaces'])" 2>/dev/null)
+    
+    if [ -z "$server_count" ] || [ "$server_count" -eq 0 ]; then
+        log_warn "未找到服务器统计信息"
+        return 1
+    fi
+    
+    # 格式化汇总信息
+    local total_rx_gb=$(echo "scale=2; $total_rx_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local total_tx_gb=$(echo "scale=2; $total_tx_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local total_rx_tb=$(echo "scale=2; $total_rx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
+    local total_tx_tb=$(echo "scale=2; $total_tx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
+    local total_bytes=$((total_rx_bytes + total_tx_bytes))
+    local total_gb=$(echo "scale=2; $total_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local total_tb=$(echo "scale=2; $total_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
+    
+    # 生成汇总文件
+    local summary=$(cat <<EOF
+========================================
+网卡流量统计汇总
+========================================
+收集时间: $(date '+%Y-%m-%d %H:%M:%S')
+服务器数量: $server_count
+总网卡数量: $total_interfaces
+
+总下行流量（接收）: $(printf "%'d" $total_rx_bytes) 字节 ($total_rx_gb GB / $total_rx_tb TB)
+总上行流量（发送）: $(printf "%'d" $total_tx_bytes) 字节 ($total_tx_gb GB / $total_tx_tb TB)
+总流量: $(printf "%'d" $total_bytes) 字节 ($total_gb GB / $total_tb TB)
+
+EOF
+    )
+    
+    # 写入汇总文件
+    echo "$summary" > "$summary_file"
+    log_info "网卡流量汇总统计已保存到: $summary_file"
+    log_info "汇总: $server_count 台服务器，总下行流量 $total_rx_gb GB，总上行流量 $total_tx_gb GB，总流量 $total_gb GB"
+    
+    return 0
+}
+
+# 整理 output 目录
+organize_output_directory() {
+    log_info "整理 output 目录..."
+    
+    local date_str=$(date +%Y%m%d)
+    local output_archive_dir="$PROJECT_DIR/output-${date_str}"
+    local subtitles_dir="$output_archive_dir/subtitles"
+    
+    # 创建归档目录
+    mkdir -p "$subtitles_dir"
+    
+    # 移动所有流量统计相关文件
+    if [ -d "$PROJECT_DIR/output" ]; then
+        local moved_stats=0
+        for file in "$PROJECT_DIR/output"/1.network_stats*.txt; do
+            if [ -f "$file" ]; then
+                local filename=$(basename "$file")
+                mv "$file" "$output_archive_dir/$filename" 2>/dev/null || true
+                log_info "已移动流量统计文件: $filename"
+                ((moved_stats++))
+            fi
+        done
+        
+        if [ $moved_stats -eq 0 ]; then
+            log_warn "未找到流量统计文件"
+        fi
+    fi
+    
+    # 移动字幕文件夹（所有以数字命名的目录，这些是 AID 目录，包含字幕文件）
+    if [ -d "$PROJECT_DIR/output" ]; then
+        local moved_count=0
+        for aid_dir in "$PROJECT_DIR/output"/[0-9]*/; do
+            if [ -d "$aid_dir" ]; then
+                local aid=$(basename "$aid_dir")
+                # 检查目录中是否有字幕文件（.srt 或 .vtt 文件）
+                if find "$aid_dir" -maxdepth 1 \( -name "*.srt" -o -name "*.vtt" \) 2>/dev/null | grep -q .; then
+                    mv "$aid_dir" "$subtitles_dir/$aid" 2>/dev/null || true
+                    ((moved_count++))
+                fi
+            fi
+        done
+        
+        if [ $moved_count -gt 0 ]; then
+            log_info "已移动 $moved_count 个字幕文件夹到: $subtitles_dir"
+        else
+            log_info "未找到包含字幕文件的目录"
+        fi
+    fi
+    
+    log_info "output 目录整理完成，归档目录: $output_archive_dir"
+}
+
 # 同步 output 目录（针对单个 IP）
 sync_output_for_ip() {
     local ip=$1
@@ -610,6 +861,31 @@ process_all_ips() {
     local success_count=0
     local fail_count=0
     local failed_ips=()
+    
+    # 对于 sync 操作，初始化网卡流量统计文件
+    # 注意：这些变量需要是全局的，因为 collect_network_stats_for_ip 函数需要使用它们
+    NETWORK_STATS_DETAIL_FILE=""
+    NETWORK_STATS_SUMMARY_FILE=""
+    NETWORK_STATS_TEMP=""
+    if [ "$action" = "sync" ]; then
+        local date_str=$(date +%Y%m%d)
+        NETWORK_STATS_DETAIL_FILE="$PROJECT_DIR/output/1.network_stats_detail_${date_str}.txt"
+        NETWORK_STATS_SUMMARY_FILE="$PROJECT_DIR/output/1.network_stats_summary_${date_str}.txt"
+        NETWORK_STATS_TEMP=$(mktemp)
+        mkdir -p "$PROJECT_DIR/output"
+        # 创建详细文件并写入标题
+        cat > "$NETWORK_STATS_DETAIL_FILE" <<EOF
+========================================
+网卡流量统计详细明细
+========================================
+收集时间: $(date '+%Y-%m-%d %H:%M:%S')
+服务器数量: ${#IPS[@]}
+服务器列表: ${IPS[*]}
+
+EOF
+        log_info "网卡流量详细统计将保存到: $NETWORK_STATS_DETAIL_FILE"
+        log_info "网卡流量汇总统计将保存到: $NETWORK_STATS_SUMMARY_FILE"
+    fi
     
     log_info "处理 ${#IPS[@]} 个服务器: ${IPS[*]}"
     echo ""
@@ -726,12 +1002,51 @@ process_all_ips() {
                 fi
                 ;;
             sync)
-                if sync_output_for_ip "$ip"; then
+                # sync 操作包括：同步 output 目录 + 收集网卡流量详细信息
+                local sync_success=true
+                local stats_success=true
+                
+                # 同步 output 目录
+                if ! sync_output_for_ip "$ip"; then
+                    sync_success=false
+                fi
+                
+                # 收集网卡流量详细信息（只收集详细信息，不生成汇总）
+                if ! collect_network_stats_for_ip "$ip" >/dev/null 2>&1; then
+                    stats_success=false
+                    log_warn "[$ip] 收集网卡流量信息失败"
+                fi
+                
+                if [ "$sync_success" = true ] && [ "$stats_success" = true ]; then
                     ((success_count++))
                 else
                     ((fail_count++))
                     failed_ips+=("$ip")
                 fi
+                ;;
+            organize)
+                # organize 操作：生成汇总统计 + 整理目录
+                # 这个操作不需要 IP，在本地执行
+                if [ ${#IPS[@]} -gt 0 ]; then
+                    log_warn "organize 操作不需要 IP 参数，将忽略 IP 列表"
+                fi
+                
+                # 生成流量汇总统计
+                if generate_network_stats_summary; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                fi
+                
+                # 整理 output 目录
+                if organize_output_directory; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                fi
+                
+                # organize 操作只执行一次，不需要循环
+                break
                 ;;
             *)
                 log_error "未知操作: $action"
@@ -741,6 +1056,9 @@ process_all_ips() {
         
         echo ""
     done
+    
+    # 对于 sync 操作，不需要额外处理（只收集详细信息）
+    # 对于 organize 操作，已经在循环中处理，这里不需要额外操作
     
     # 输出总结
     echo "========================================"

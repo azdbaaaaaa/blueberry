@@ -17,7 +17,7 @@ REMOTE_PUSH_HOST?=66.42.63.131
 REMOTE_PUSH_DIR?=/opt/blueberry
 SCRIPTS_DIR?=scripts
 
-.PHONY: build install run start stop logs sync-cookies sync-config push ssh-keygen ssh-add-key
+.PHONY: build install run start stop logs sync-cookies sync-config push ssh-keygen ssh-add-key ssh-setup
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -116,6 +116,20 @@ ssh-keygen:
 # Add SSH public key to server authorized_keys (print command only)
 ssh-add-key:
 	@echo "echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCjUDQAgCK43S5PCPxyrZZWf9sozcUKWsgygguwmCfzU6YyENhYEDx07hzXyNYlxMrBuAk3pva0AQRPFk4TwWEkVvukMpLfwxFVxiGpF4Dq1F7cfevhPR91XpU4K7kjSLB/KML0b8LMtP7gK5b9+oge0F6r5UYEgMSjlWLsIU1mEmpnutR5B1sSXWKgUQoW957IvaGyb0buW7uH35Ndbl8dIDEdB7eTReCi8m13MdhM5MLbqrccnrCh+gsVSV/I35W9qlRIuJvWv0JkobnDmiTR1QuovctnDa5zxhZsfIqvZN+ItuymONHy8d1qPlfrCt5EE0EGUqk2yf04cbrR4eXKJadok0QZ5fpRjy0nBU5WvsVcj9jUPVX23sGCjurt2pqXsO/cKoRrwIaAAAKW4Ych48xKhDrgSvaZGpRzf1cOuZmUXNVLlT/jSvFDVWurITOFqNX8nx4Hti9/QCvB2u48uKfBvSnAvCMMhEcQF/yigPzTBYVwNT+hjUZY2aLErPE= jimmy@jimmydeMacBook-Pro.local' | cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+# Setup SSH key: generate key and add to server (print commands only)
+ssh-setup:
+	@echo "=========================================="
+	@echo "SSH Key Setup Commands"
+	@echo "=========================================="
+	@echo ""
+	@echo "Step 1: Generate SSH key"
+	@echo "ssh-keygen -t ed25519 -f $(SSH_KEY_PATH) -N \"\" -C \"blueberry-$(REMOTE_PUSH_USER)@$(REMOTE_PUSH_HOST)\""
+	@echo ""
+	@echo "Step 2: Add public key to server"
+	@echo "echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCjUDQAgCK43S5PCPxyrZZWf9sozcUKWsgygguwmCfzU6YyENhYEDx07hzXyNYlxMrBuAk3pva0AQRPFk4TwWEkVvukMpLfwxFVxiGpF4Dq1F7cfevhPR91XpU4K7kjSLB/KML0b8LMtP7gK5b9+oge0F6r5UYEgMSjlWLsIU1mEmpnutR5B1sSXWKgUQoW957IvaGyb0buW7uH35Ndbl8dIDEdB7eTReCi8m13MdhM5MLbqrccnrCh+gsVSV/I35W9qlRIuJvWv0JkobnDmiTR1QuovctnDa5zxhZsfIqvZN+ItuymONHy8d1qPlfrCt5EE0EGUqk2yf04cbrR4eXKJadok0QZ5fpRjy0nBU5WvsVcj9jUPVX23sGCjurt2pqXsO/cKoRrwIaAAAKW4Ych48xKhDrgSvaZGpRzf1cOuZmUXNVLlT/jSvFDVWurITOFqNX8nx4Hti9/QCvB2u48uKfBvSnAvCMMhEcQF/yigPzTBYVwNT+hjUZY2aLErPE= jimmy@jimmydeMacBook-Pro.local' | cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+	@echo ""
+	@echo "=========================================="
 
 # -------- Docker helpers --------
 IMAGE?=blueberry:latest
