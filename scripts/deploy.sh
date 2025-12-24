@@ -780,6 +780,7 @@ organize_output_directory() {
     local date_str=$(date +%Y%m%d)
     local output_archive_dir="$PROJECT_DIR/output-${date_str}"
     local subtitles_dir="$output_archive_dir/subtitles"
+    local downloads_dir="$PROJECT_DIR/downloads"
     
     # 创建归档目录
     mkdir -p "$subtitles_dir"
@@ -801,27 +802,279 @@ organize_output_directory() {
         fi
     fi
     
-    # 移动字幕文件夹（所有以数字命名的目录，这些是 AID 目录，包含字幕文件）
-    if [ -d "$PROJECT_DIR/output" ]; then
-        local moved_count=0
-        for aid_dir in "$PROJECT_DIR/output"/[0-9]*/; do
-            if [ -d "$aid_dir" ]; then
-                local aid=$(basename "$aid_dir")
-                # 检查目录中是否有字幕文件（.srt 或 .vtt 文件）
-                if find "$aid_dir" -maxdepth 1 \( -name "*.srt" -o -name "*.vtt" \) 2>/dev/null | grep -q .; then
-                    mv "$aid_dir" "$subtitles_dir/$aid" 2>/dev/null || true
-                    ((moved_count++))
-                fi
-            fi
-        done
-        
-        if [ $moved_count -gt 0 ]; then
-            log_info "已移动 $moved_count 个字幕文件夹到: $subtitles_dir"
-        else
-            log_info "未找到包含字幕文件的目录"
-        fi
+    # 检查 downloads 目录是否存在
+    if [ ! -d "$downloads_dir" ]; then
+        log_warn "downloads 目录不存在: $downloads_dir，跳过字幕整理"
+        log_info "output 目录整理完成，归档目录: $output_archive_dir"
+        return 0
     fi
     
+    # 遍历 downloads 下的所有 channel 目录
+    local processed_count=0
+    local skipped_count=0
+    local copied_count=0
+    
+    for channel_dir in "$downloads_dir"/*/; do
+        if [ ! -d "$channel_dir" ]; then
+            continue
+        fi
+        
+        local channel_id=$(basename "$channel_dir")
+        log_info "处理频道: $channel_id"
+        
+        # 遍历频道下的所有视频目录
+        for video_dir in "$channel_dir"*/; do
+            if [ ! -d "$video_dir" ]; then
+                continue
+            fi
+            
+            # 检查是否已经 organize 过
+            local organize_marker="$video_dir/.organized"
+            if [ -f "$organize_marker" ]; then
+                ((skipped_count++))
+                continue
+            fi
+            
+            # 检查上传状态
+            local upload_status_file="$video_dir/upload_status.json"
+            if [ ! -f "$upload_status_file" ]; then
+                continue
+            fi
+            
+            # 使用 Python 检查上传状态
+            local is_uploaded=$(python3 <<EOF
+import json
+import sys
+
+try:
+    with open("$upload_status_file", 'r', encoding='utf-8') as f:
+        status = json.load(f)
+    
+    # 检查 status == "completed" 或 uploaded == True
+    if status.get('status') == 'completed' or status.get('uploaded') is True:
+        print('true')
+    else:
+        print('false')
+except Exception as e:
+    print('false', file=sys.stderr)
+    sys.exit(1)
+EOF
+            )
+            
+            if [ "$is_uploaded" != "true" ]; then
+                continue
+            fi
+            
+            # 获取视频信息
+            local video_info_file="$video_dir/video_info.json"
+            if [ ! -f "$video_info_file" ]; then
+                continue
+            fi
+            
+            # 使用 Python 提取 video_id, title, aid
+            local video_data=$(python3 <<EOF
+import json
+import sys
+
+try:
+    # 读取 video_info.json
+    with open("$video_info_file", 'r', encoding='utf-8') as f:
+        video_info = json.load(f)
+    
+    video_id = video_info.get('id', '')
+    title = video_info.get('title', '')
+    
+    # 读取 upload_status.json 获取 aid
+    with open("$upload_status_file", 'r', encoding='utf-8') as f:
+        upload_status = json.load(f)
+    
+    aid = upload_status.get('bilibili_aid', '')
+    
+    # 清理标题（移除特殊字符，用于文件名）
+    import re
+    sanitized_title = re.sub(r'[<>:"/\\|?*]', '_', title)
+    sanitized_title = sanitized_title.strip(' .')
+    
+    result = {
+        'video_id': video_id,
+        'title': title,
+        'sanitized_title': sanitized_title,
+        'aid': str(aid) if aid else ''
+    }
+    
+    print(json.dumps(result))
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+EOF
+            )
+            
+            if [ $? -ne 0 ] || [ -z "$video_data" ]; then
+                log_warn "无法读取视频信息: $video_dir"
+                continue
+            fi
+            
+            local video_id=$(echo "$video_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['video_id'])" 2>/dev/null)
+            local title=$(echo "$video_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['title'])" 2>/dev/null)
+            local sanitized_title=$(echo "$video_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['sanitized_title'])" 2>/dev/null)
+            local aid=$(echo "$video_data" | python3 -c "import sys, json; print(json.load(sys.stdin)['aid'])" 2>/dev/null)
+            
+            if [ -z "$video_id" ] || [ -z "$title" ]; then
+                log_warn "视频信息不完整: $video_dir"
+                continue
+            fi
+            
+            # 查找字幕文件
+            local subtitle_files=$(find "$video_dir" -maxdepth 1 -name "*.srt" -o -name "*.vtt" 2>/dev/null)
+            
+            if [ -z "$subtitle_files" ]; then
+                # 没有字幕文件，标记为已处理
+                touch "$organize_marker"
+                ((processed_count++))
+                continue
+            fi
+            
+            # 使用 Python 处理字幕文件（避免使用关联数组，兼容性更好）
+            # 通过环境变量传递参数，避免 heredoc 参数传递问题
+            local python_result=$(PYTHON_VIDEO_DIR="$video_dir" \
+                PYTHON_SUBTITLES_DIR="$subtitles_dir" \
+                PYTHON_SANITIZED_TITLE="$sanitized_title" \
+                PYTHON_VIDEO_ID="$video_id" \
+                PYTHON_AID="$aid" \
+                python3 <<'PYTHON_SCRIPT'
+import json
+import os
+import re
+import shutil
+import sys
+
+# 从环境变量读取参数
+video_dir = os.environ.get('PYTHON_VIDEO_DIR', '')
+subtitles_dir = os.environ.get('PYTHON_SUBTITLES_DIR', '')
+sanitized_title = os.environ.get('PYTHON_SANITIZED_TITLE', '')
+video_id = os.environ.get('PYTHON_VIDEO_ID', '')
+aid = os.environ.get('PYTHON_AID', '')
+
+# 验证参数
+if not video_dir or not subtitles_dir or not video_id:
+    print("ERROR: 必需参数为空", file=sys.stderr)
+    print(f"ERROR: video_dir={video_dir}, subtitles_dir={subtitles_dir}, video_id={video_id}", file=sys.stderr)
+    sys.exit(1)
+
+# 收集所有字幕文件
+subtitle_files = []
+try:
+    for f in os.listdir(video_dir):
+        if f.endswith('.srt') or f.endswith('.vtt'):
+            subtitle_files.append(f)
+except Exception as e:
+    print(f"ERROR: 读取目录失败: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# 按语言组织字幕
+subtitle_by_lang = {}  # lang -> {'new': file, 'old': file}
+
+for subtitle_file in subtitle_files:
+    # 检查是否是新格式：title[video_id].lang.ext
+    # 转义 video_id 中的特殊字符
+    escaped_video_id = re.escape(video_id)
+    new_format_pattern = r'.*\[{}\]\.([a-zA-Z-]+)\.(srt|vtt)$'.format(escaped_video_id)
+    match = re.match(new_format_pattern, subtitle_file)
+    if match:
+        lang = match.group(1)
+        if lang not in subtitle_by_lang:
+            subtitle_by_lang[lang] = {}
+        subtitle_by_lang[lang]['new'] = subtitle_file
+        continue
+    
+    # 检查是否是旧格式：aid_lang.ext
+    if aid:
+        escaped_aid = re.escape(aid)
+        old_format_pattern = r'^{}_([a-zA-Z-]+)\.(srt|vtt)$'.format(escaped_aid)
+        match = re.match(old_format_pattern, subtitle_file)
+        if match:
+            lang = match.group(1)
+            if lang not in subtitle_by_lang:
+                subtitle_by_lang[lang] = {}
+            subtitle_by_lang[lang]['old'] = subtitle_file
+
+# 处理每个语言的字幕
+copied_count = 0
+for lang, files in subtitle_by_lang.items():
+    subtitle_file = None
+    subtitle_ext = 'srt'
+    
+    # 优先使用新格式
+    if 'new' in files:
+        subtitle_file = files['new']
+        subtitle_ext = os.path.splitext(subtitle_file)[1][1:]  # 去掉点
+    # 如果新格式不存在，使用旧格式并创建新格式副本
+    elif 'old' in files:
+        subtitle_file = files['old']
+        subtitle_ext = os.path.splitext(subtitle_file)[1][1:]  # 去掉点
+        
+        # 创建新格式的副本
+        new_format_subtitle = "{sanitized_title}[{video_id}].{lang}.{ext}".format(
+            sanitized_title=sanitized_title,
+            video_id=video_id,
+            lang=lang,
+            ext=subtitle_ext
+        )
+        new_format_path = os.path.join(video_dir, new_format_subtitle)
+        old_format_path = os.path.join(video_dir, subtitle_file)
+        
+        if not os.path.exists(new_format_path):
+            try:
+                shutil.copy2(old_format_path, new_format_path)
+                print("已创建新格式字幕: {}".format(new_format_subtitle), file=sys.stderr)
+            except Exception as e:
+                print("创建新格式字幕失败: {}".format(e), file=sys.stderr)
+    else:
+        continue
+    
+    # 复制到 subtitles 目录（使用新格式命名）
+    if subtitle_file:
+        dest_subtitle = "{sanitized_title}[{video_id}].{lang}.{ext}".format(
+            sanitized_title=sanitized_title,
+            video_id=video_id,
+            lang=lang,
+            ext=subtitle_ext
+        )
+        dest_path = os.path.join(subtitles_dir, dest_subtitle)
+        src_path = os.path.join(video_dir, subtitle_file)
+        
+        try:
+            shutil.copy2(src_path, dest_path)
+            copied_count += 1
+        except Exception as e:
+            print("复制字幕失败: {}".format(e), file=sys.stderr)
+
+# 输出复制的数量
+print("COPIED:{}".format(copied_count))
+PYTHON_SCRIPT
+            )
+            
+            local python_exit_code=$?
+            
+            # 检查是否有错误，如果有错误直接退出
+            if [ $python_exit_code -ne 0 ] || echo "$python_result" | grep -q "^ERROR:"; then
+                log_error "处理字幕文件失败: $python_result"
+                exit 1
+            fi
+            
+            # 提取复制的数量
+            local python_copied=$(echo "$python_result" | grep "^COPIED:" | sed 's/^COPIED://')
+            if [ -n "$python_copied" ] && [[ "$python_copied" =~ ^[0-9]+$ ]]; then
+                copied_count=$((copied_count + python_copied))
+            fi
+            
+            # 标记为已处理
+            touch "$organize_marker"
+            ((processed_count++))
+        done
+    done
+    
+    log_info "字幕整理完成: 处理 $processed_count 个视频，跳过 $skipped_count 个已处理视频，复制 $copied_count 个字幕文件"
     log_info "output 目录整理完成，归档目录: $output_archive_dir"
 }
 

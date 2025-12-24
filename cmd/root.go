@@ -35,6 +35,7 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 	rootCmd.AddCommand(channelCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(organizeCmd)
 }
 
 func initConfig() {

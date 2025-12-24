@@ -1,6 +1,6 @@
 youtube:
-  cookies_file: "./cookies/yt_2.txt"  # 136xxxx2542@163.com  jimmy12zhou@gmail.com
-  video_limit_before_rest: 30  # 成功下载多少个视频后休息（0 表示不限制）
+  cookies_file: "./cookies/yt_17.txt" # jimmy7zhou@gmail.com
+  video_limit_before_rest: 40  # 成功下载多少个视频后休息（0 表示不限制）
   concurrent_fragments: 1  # 并发下载片段数，提高下载速度
   sleep_interval_seconds: 30  # 睡眠间隔时间（秒）
   video_limit_rest_duration: 120  # 休息时长（分钟），默认1小时，实际休息时间会在此基础上随机增加 0-10%
@@ -9,10 +9,10 @@ youtube_channels:
   - url: "https://www.youtube.com/@Qixiang-Animation/videos"
     languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
     limit: 400
-    offset: 0
+    offset: 400
 
 bilibili_accounts:
-  account2:
-    username: "beMcfuS9ogcHWD2S@gmail.com"
-    userid: "1256654608"
-    cookies_file: "./cookies/blbl_2.txt"
+  account7:
+    username: "om4ZDAa0QWyfyqdl@gmail.com"
+    userid: "1257023168"
+    cookies_file: "./cookies/blbl_7.txt"

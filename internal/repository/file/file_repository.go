@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type uploadCounters struct {
@@ -514,15 +516,51 @@ func (r *repository) SanitizeTitle(title string) string {
 	sanitized = strings.ReplaceAll(sanitized, "\r", "_")
 	sanitized = strings.ReplaceAll(sanitized, "\t", "_")
 
+	// 使用 rune 遍历，只保留可打印的字符和常见的中文标点
+	var result strings.Builder
+	for _, r := range sanitized {
+		// 使用 unicode.IsPrint 检查字符是否可打印
+		// 但排除某些可能导致问题的控制字符
+		if unicode.IsPrint(r) && r != 0 {
+			// 允许可打印字符
+			result.WriteRune(r)
+		} else if r == '\n' || r == '\r' || r == '\t' {
+			// 换行符和制表符替换为下划线
+			result.WriteRune('_')
+		} else {
+			// 其他不可打印字符替换为下划线
+			result.WriteRune('_')
+		}
+	}
+	sanitized = result.String()
+
+	// 移除连续的下划线
+	for strings.Contains(sanitized, "__") {
+		sanitized = strings.ReplaceAll(sanitized, "__", "_")
+	}
+
+	// 移除首尾下划线
+	sanitized = strings.Trim(sanitized, "_")
+
 	// 限制长度（避免路径过长）
 	maxLen := 200
 	if len(sanitized) > maxLen {
-		sanitized = sanitized[:maxLen]
+		// 按 rune 截断，避免截断多字节字符
+		runes := []rune(sanitized)
+		if len(runes) > maxLen {
+			sanitized = string(runes[:maxLen])
+		}
 	}
 
 	// 如果清理后为空，返回默认值
 	if sanitized == "" {
 		sanitized = "untitled"
+	}
+
+	// 最后验证：确保字符串是有效的 UTF-8
+	if !utf8.ValidString(sanitized) {
+		// 如果不是有效的 UTF-8，进行修复
+		sanitized = strings.ToValidUTF8(sanitized, "_")
 	}
 
 	return sanitized
