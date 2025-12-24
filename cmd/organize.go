@@ -112,8 +112,11 @@ var organizeCmd = &cobra.Command{
 			return
 		}
 
-		processedCount := 0
+		processedCount := 0 // 本次运行中成功处理并标记为已处理的视频目录数量
 		skippedCount := 0
+		skippedAlreadyOrganized := 0 // 已经有 .organized 标记的
+		skippedNotUploaded := 0      // 还没有上传成功的
+		totalScanned := 0            // 总共扫描的视频目录数量
 		copiedCount := 0
 
 		// 遍历所有频道目录
@@ -150,12 +153,14 @@ var organizeCmd = &cobra.Command{
 					continue
 				}
 
+				totalScanned++ // 统计扫描的视频目录数量
 				videoDir := filepath.Join(channelDir, videoEntry.Name())
 
 				// 检查是否已经 organize 过（除非使用 --force）
 				organizeMarker := filepath.Join(videoDir, ".organized")
 				if !organizeForce {
 					if _, err := os.Stat(organizeMarker); err == nil {
+						skippedAlreadyOrganized++
 						skippedCount++
 						continue
 					}
@@ -164,6 +169,7 @@ var organizeCmd = &cobra.Command{
 				// 检查上传状态
 				uploadStatusFile := filepath.Join(videoDir, "upload_status.json")
 				if !fileRepo.IsVideoUploaded(videoDir) {
+					skippedNotUploaded++
 					continue
 				}
 
@@ -344,8 +350,11 @@ var organizeCmd = &cobra.Command{
 		}
 
 		logger.Info().
+			Int("total_scanned", totalScanned).
 			Int("processed", processedCount).
 			Int("skipped", skippedCount).
+			Int("skipped_already_organized", skippedAlreadyOrganized).
+			Int("skipped_not_uploaded", skippedNotUploaded).
 			Int("copied", copiedCount).
 			Str("archive_dir", archiveDir).
 			Msg("字幕整理完成")
