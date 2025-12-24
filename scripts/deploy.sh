@@ -48,6 +48,7 @@ if [ $# -lt 1 ]; then
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
     echo "  sync     - 同步远程服务器的 output 目录到本地，并收集网卡流量详细信息"
+    echo "  sync-meta - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地"
     echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
     echo ""
     echo "Service types: download, upload, both (默认: both)"
@@ -76,7 +77,7 @@ fi
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|sync-meta|organize)
             ACTIONS+=("$1")
             shift
             ;;
@@ -855,6 +856,46 @@ sync_output_for_ip() {
     fi
 }
 
+# 同步 downloads 目录下的元数据文件（针对单个 IP）
+sync_meta_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "同步远程 downloads 目录下的元数据文件到本地..."
+    
+    local remote_downloads_dir="$REMOTE_DIR/downloads"
+    local local_downloads_dir="$PROJECT_DIR/downloads"
+    
+    # 创建本地目录（如果不存在）
+    mkdir -p "$local_downloads_dir"
+    
+    # 检查远程目录是否存在
+    if ! remote_exec "test -d $remote_downloads_dir"; then
+        log_warn "[$ip] 远程 downloads 目录不存在: $remote_downloads_dir，跳过同步"
+        return 0
+    fi
+    
+    log_ip "$ip" "从 $REMOTE_HOST:$remote_downloads_dir/ 同步元数据文件到 $local_downloads_dir/"
+    
+    # 使用 rsync 同步，只包含 .description, .json, .srt 文件
+    # --include 和 --exclude 的顺序很重要，先 include 再 exclude
+    # 使用 --prune-empty-dirs 删除空目录
+    if rsync -azP -e "ssh $SSH_OPTS" \
+        --include="*/" \
+        --include="*.description" \
+        --include="*.json" \
+        --include="*.srt" \
+        --exclude="*" \
+        --prune-empty-dirs \
+        "$REMOTE_HOST:$remote_downloads_dir/" "$local_downloads_dir/"; then
+        log_ip "$ip" "✓ downloads 元数据文件同步完成"
+        return 0
+    else
+        log_error "[$ip] downloads 元数据文件同步失败"
+        return 1
+    fi
+}
+
 # 处理所有 IP 的主函数
 process_all_ips() {
     local action=$1
@@ -1018,6 +1059,15 @@ EOF
                 fi
                 
                 if [ "$sync_success" = true ] && [ "$stats_success" = true ]; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                    failed_ips+=("$ip")
+                fi
+                ;;
+            sync-meta)
+                # sync-meta 操作：同步 downloads 目录下的元数据文件（.description, .json, .srt）
+                if sync_meta_for_ip "$ip"; then
                     ((success_count++))
                 else
                     ((fail_count++))

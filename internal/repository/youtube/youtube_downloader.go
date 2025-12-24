@@ -426,8 +426,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 				} else {
 					logger.Debug().Msg("自动修复字幕时间轴重叠已禁用")
 				}
-				// 重命名字幕文件为 {video_id}_{lang}.{ext} 格式（暂时禁用）
-				// result.SubtitlePaths = d.renameSubtitlesToIDFormat(videoDir, videoID, result.SubtitlePaths)
+				// 重命名字幕文件为 {title}[{video_id}].{lang}.{ext} 格式
+				result.SubtitlePaths = d.renameSubtitlesToTitleFormat(videoDir, videoID, title, result.SubtitlePaths)
 			}
 
 			result.VideoTitle = d.fileRepo.ExtractVideoTitleFromFile(videoFile)
@@ -884,10 +884,17 @@ func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePa
 	return convertedPaths
 }
 
-// renameSubtitlesToIDFormat 将字幕文件重命名为 {video_id}_{lang}.{ext} 格式
+// renameSubtitlesToTitleFormat 将字幕文件重命名为 {title}[{video_id}].{lang}.{ext} 格式
 // 输入格式可能是：{video_id}.{lang}.{ext} 或 {video_id}.{lang}.frame.srt
-func (d *downloader) renameSubtitlesToIDFormat(videoDir, videoID string, subtitlePaths []string) []string {
+func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title string, subtitlePaths []string) []string {
 	var renamedPaths []string
+
+	// 清理标题中的特殊字符，确保文件名安全
+	sanitizedTitle := d.fileRepo.SanitizeTitle(title)
+	// 如果标题为空或清理后为空，使用 videoID 作为标题
+	if sanitizedTitle == "" {
+		sanitizedTitle = videoID
+	}
 
 	for _, subtitlePath := range subtitlePaths {
 		base := filepath.Base(subtitlePath)
@@ -933,13 +940,13 @@ func (d *downloader) renameSubtitlesToIDFormat(videoDir, videoID string, subtitl
 			continue
 		}
 
-		// 构建新文件名：{video_id}_{lang}.{ext}
+		// 构建新文件名：{title}[{video_id}].{lang}.{ext}
 		// 如果扩展名是 .frame.srt，改为 .srt（因为转换后应该已经是 .srt 格式）
 		finalExt := ext
 		if ext == ".frame.srt" {
 			finalExt = ".srt"
 		}
-		newName := fmt.Sprintf("%s_%s%s", videoID, lang, finalExt)
+		newName := fmt.Sprintf("%s[%s].%s%s", sanitizedTitle, videoID, lang, finalExt)
 		newPath := filepath.Join(videoDir, newName)
 
 		// 如果新文件已存在，先删除
@@ -962,7 +969,7 @@ func (d *downloader) renameSubtitlesToIDFormat(videoDir, videoID string, subtitl
 				Str("old_path", subtitlePath).
 				Str("new_path", newPath).
 				Str("lang", lang).
-				Msg("字幕文件已重命名为 {video_id}_{lang}.{ext} 格式")
+				Msg("字幕文件已重命名为 {title}[{video_id}].{lang}.{ext} 格式")
 			renamedPaths = append(renamedPaths, newPath)
 		}
 	}
