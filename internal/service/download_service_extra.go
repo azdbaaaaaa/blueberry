@@ -599,47 +599,10 @@ func (s *downloadService) DownloadVideoDir(ctx context.Context, videoDir string)
 		Str("title", videoInfo.Title).
 		Msg("提取频道和视频信息")
 
-	// 优先从 download_status.json 中获取字幕语言列表（这是 sync-channel 时保存的）
-	languages, err := s.fileManager.GetSubtitleLanguagesFromStatus(videoDir)
-	if err != nil {
-		logger.Warn().Err(err).Msg("从 download_status.json 读取字幕语言失败，尝试从配置获取")
-		// 如果读取失败，回退到从配置中获取
-		var channel *config.YouTubeChannel
-		for _, ch := range s.cfg.YouTubeChannels {
-			chID := s.fileManager.ExtractChannelID(ch.URL)
-			if chID == channelID {
-				channel = &ch
-				break
-			}
-		}
-
-		if channel != nil {
-			languages = s.getChannelLanguages(channel)
-		} else {
-			languages = s.getDefaultSubtitleLanguages()
-		}
-	} else {
-		logger.Info().Strs("languages", languages).Msg("从 download_status.json 读取字幕语言")
-	}
-
-	// 如果仍然没有语言列表，使用默认配置
-	if len(languages) == 0 {
-		var channel *config.YouTubeChannel
-		for _, ch := range s.cfg.YouTubeChannels {
-			chID := s.fileManager.ExtractChannelID(ch.URL)
-			if chID == channelID {
-				channel = &ch
-				break
-			}
-		}
-
-		if channel != nil {
-			languages = s.getChannelLanguages(channel)
-		} else {
-			languages = s.getDefaultSubtitleLanguages()
-		}
-		logger.Info().Strs("languages", languages).Msg("使用配置中的字幕语言")
-	}
+	// 固定使用所有渠道都使用的字幕语言：en, id, ms, th, vn, zh-Hans
+	// 不再从 download_status.json 或配置文件中读取
+	languages := s.getDefaultSubtitleLanguages()
+	logger.Info().Strs("languages", languages).Msg("使用固定的字幕语言列表")
 
 	// 构建 rawData（从 videoInfo 中提取）
 	rawData := make(map[string]interface{})
