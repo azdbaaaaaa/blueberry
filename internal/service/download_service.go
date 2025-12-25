@@ -45,6 +45,16 @@ type DownloadService interface {
 	// DownloadVideoDir 下载指定视频目录的视频
 	// videoDir: 视频目录路径（例如：downloads/Comic-likerhythm/videoID）
 	DownloadVideoDir(ctx context.Context, videoDir string) error
+
+	// FixSubtitles 补充缺失的字幕文件
+	// 遍历所有视频目录，检查字幕文件，补充缺失的字幕
+	FixSubtitles(ctx context.Context) error
+
+	// FixSubtitlesForChannelDir 补充指定频道目录的字幕文件
+	FixSubtitlesForChannelDir(ctx context.Context, channelDir string) error
+
+	// FixSubtitlesForVideoDir 补充指定视频目录的字幕文件
+	FixSubtitlesForVideoDir(ctx context.Context, videoDir string) error
 }
 
 type downloadService struct {
