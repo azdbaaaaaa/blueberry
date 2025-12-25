@@ -32,7 +32,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, sync-meta, organize, subtitle"
     echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
     echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -50,6 +50,7 @@ if [ $# -lt 1 ]; then
     echo "  sync     - 同步远程服务器的 output 目录到本地，并收集网卡流量详细信息"
     echo "  sync-meta - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地"
     echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
+    echo "  subtitle - 在远程服务器上后台执行 subtitle 命令（如果已在执行则跳过）"
     echo ""
     echo "Service types: download, upload, both (默认: both)"
     echo ""
@@ -77,7 +78,7 @@ fi
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|sync-meta|organize)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|sync-meta|organize|subtitle)
             ACTIONS+=("$1")
             shift
             ;;
@@ -1237,6 +1238,45 @@ sync_meta_for_ip() {
     fi
 }
 
+# 在远程服务器上执行 subtitle 命令（针对单个 IP）
+subtitle_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "检查 subtitle 命令是否已在执行..."
+    
+    # 检查是否已经有 subtitle 命令在执行
+    # 检查 /opt/blueberry/blueberry 进程，且命令行参数包含 "subtitle"
+    if remote_exec "ps aux | grep '$REMOTE_DIR/blueberry' | grep 'subtitle' | grep -v grep > /dev/null 2>&1"; then
+        log_ip "$ip" "subtitle 命令已在执行，跳过"
+        return 0
+    fi
+    
+    log_ip "$ip" "在后台执行 subtitle 命令..."
+    
+    # 使用 nohup 在后台执行，输出重定向到日志文件
+    local log_file="$REMOTE_DIR/subtitle.log"
+    local error_log_file="$REMOTE_DIR/subtitle.error.log"
+    
+    # 在后台执行，不等待返回
+    remote_exec "cd $REMOTE_DIR && nohup $REMOTE_DIR/blueberry subtitle > $log_file 2> $error_log_file < /dev/null &" || {
+        log_error "[$ip] 启动 subtitle 命令失败"
+        return 1
+    }
+    
+    # 等待一小段时间，确认进程已启动
+    sleep 1
+    
+    # 再次检查进程是否已启动
+    if remote_exec "ps aux | grep '$REMOTE_DIR/blueberry' | grep 'subtitle' | grep -v grep > /dev/null 2>&1"; then
+        log_ip "$ip" "✓ subtitle 命令已在后台启动（日志: $log_file, 错误日志: $error_log_file）"
+        return 0
+    else
+        log_error "[$ip] subtitle 命令启动失败，请检查日志: $error_log_file"
+        return 1
+    fi
+}
+
 # 处理所有 IP 的主函数
 process_all_ips() {
     local action=$1
@@ -1409,6 +1449,15 @@ EOF
             sync-meta)
                 # sync-meta 操作：同步 downloads 目录下的元数据文件（.description, .json, .srt）
                 if sync_meta_for_ip "$ip"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                    failed_ips+=("$ip")
+                fi
+                ;;
+            subtitle)
+                # subtitle 操作：在远程服务器上后台执行 subtitle 命令
+                if subtitle_for_ip "$ip"; then
                     ((success_count++))
                 else
                     ((fail_count++))

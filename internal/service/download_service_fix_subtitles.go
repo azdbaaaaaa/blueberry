@@ -317,6 +317,60 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 			}
 		}
 
+		// 快速检查：如果所有语言都已完成（downloaded 或 not_found），可以提前跳过
+		allCompleted := true
+		if record != nil && len(record.Statuses) > 0 {
+			for _, lang := range languages {
+				statusInfo, hasStatus := record.Statuses[lang]
+				if !hasStatus {
+					allCompleted = false
+					break
+				}
+				if statusInfo.Status != SubtitleStatusDownloaded && statusInfo.Status != SubtitleStatusNotFound {
+					allCompleted = false
+					break
+				}
+				// 如果是 downloaded，还需要验证文件是否存在
+				if statusInfo.Status == SubtitleStatusDownloaded {
+					if statusInfo.FilePath == "" {
+						allCompleted = false
+						break
+					}
+					if _, err := os.Stat(statusInfo.FilePath); err != nil {
+						allCompleted = false
+						break
+					}
+				}
+			}
+		} else {
+			allCompleted = false
+		}
+
+		// 如果所有语言都已完成，检查是否所有新格式文件都存在
+		if allCompleted {
+			allFilesExist := true
+			for _, lang := range languages {
+				expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", sanitizeTitle(videoInfo.Title), videoID, lang)
+				expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
+				if _, err := os.Stat(expectedNewFormatPath); err != nil {
+					// 如果某个语言标记为 not_found，文件不存在是正常的
+					if langStatusInfo, hasStatus := record.Statuses[lang]; hasStatus && langStatusInfo.Status == SubtitleStatusNotFound {
+						continue
+					}
+					allFilesExist = false
+					break
+				}
+			}
+			if allFilesExist {
+				logger.Debug().
+					Str("video_id", videoID).
+					Str("title", videoInfo.Title).
+					Msg("所有字幕已完成，跳过处理")
+				skippedSubtitles += len(languages)
+				continue
+			}
+		}
+
 		// 先检查每个语言的字幕，收集需要下载的语言列表
 		needDownloadLangs := make([]string, 0)
 		subtitleFiles, _ := s.fileManager.FindSubtitleFiles(videoDir)
@@ -468,7 +522,9 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 						errorMsg := result.err.Error()
 						if strings.Contains(errorMsg, "not available") ||
 							strings.Contains(errorMsg, "not found") ||
-							strings.Contains(errorMsg, "no subtitle") {
+							strings.Contains(errorMsg, "no subtitle") ||
+							strings.Contains(errorMsg, "未找到该语言的字幕文件") ||
+							strings.Contains(errorMsg, "该语言没有字幕") {
 							// 该语言没有字幕，记录为 not_found
 							statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusNotFound, "", errorMsg)
 							logger.Info().
@@ -741,7 +797,9 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 					errorMsg := result.err.Error()
 					if strings.Contains(errorMsg, "not available") ||
 						strings.Contains(errorMsg, "not found") ||
-						strings.Contains(errorMsg, "no subtitle") {
+						strings.Contains(errorMsg, "no subtitle") ||
+						strings.Contains(errorMsg, "未找到该语言的字幕文件") ||
+						strings.Contains(errorMsg, "该语言没有字幕") {
 						// 该语言没有字幕，记录为 not_found
 						statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusNotFound, "", errorMsg)
 						logger.Info().
