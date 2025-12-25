@@ -38,6 +38,7 @@ if [ $# -lt 1 ]; then
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
     echo "  install  - 安装 systemd 服务（使用 config-<ip>.yaml 或 <编号>.config-<ip>.yaml）"
     echo "            --init: 安装完成后运行 'channel' 命令获取频道信息"
+    echo "            --skip-cookies: 跳过上传 cookies 文件夹"
     echo "  uninstall - 卸载 systemd 服务"
     echo "  start    - 启动服务"
     echo "  stop     - 停止服务"
@@ -75,6 +76,9 @@ if [ $# -lt 1 ]; then
 fi
 
 # 解析 ACTION 列表（支持多个操作）
+# 初始化选项变量（在循环之前，这样循环中可以设置它们）
+INIT_AFTER_INSTALL=false
+SKIP_COOKIES=false
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
@@ -82,7 +86,17 @@ while [ $# -gt 0 ]; do
             ACTIONS+=("$1")
             shift
             ;;
-        --init|download|upload|both|*)
+        --init)
+            # 遇到 --init 选项，设置变量并跳过，继续解析后续 ACTION
+            INIT_AFTER_INSTALL=true
+            shift
+            ;;
+        --skip-cookies)
+            # 遇到 --skip-cookies 选项，设置变量并跳过，继续解析后续 ACTION
+            SKIP_COOKIES=true
+            shift
+            ;;
+        download|upload|both|*)
             # 遇到非 ACTION 参数，停止解析 ACTION
             break
             ;;
@@ -95,9 +109,9 @@ if [ ${#ACTIONS[@]} -eq 0 ]; then
     exit 1
 fi
 
-# 解析参数：提取 IP 列表、--init 选项和 service_type
+# 解析参数：提取 IP 列表、service_type
+# 注意：INIT_AFTER_INSTALL 和 SKIP_COOKIES 已经在 ACTION 解析阶段初始化并可能被设置
 IPS=()
-INIT_AFTER_INSTALL=false
 SERVICE_TYPE="both"
 
 # 根据编号查找配置文件并提取 IP
@@ -191,11 +205,21 @@ while [ $# -gt 0 ]; do
             INIT_AFTER_INSTALL=true
             shift
             ;;
+        --skip-cookies)
+            SKIP_COOKIES=true
+            shift
+            ;;
         download|upload|both)
             SERVICE_TYPE=$1
             shift
             ;;
         *)
+            # 检查是否是选项（以 -- 开头），如果是则报错（应该在前面处理）
+            if [[ $1 == --* ]]; then
+                log_error "未知选项: $1"
+                log_error "支持的选项: --init, --skip-cookies"
+                exit 1
+            fi
             # 解析 IP（支持逗号分隔或单个 IP）
             if ! parse_ips "$1"; then
                 exit 1
@@ -346,13 +370,17 @@ install_service_for_ip() {
     log_ip "$ip" "复制配置文件: $CONFIG_FILE -> $REMOTE_DIR/config.yaml"
     remote_copy "$CONFIG_FILE" "$REMOTE_HOST:$REMOTE_DIR/config.yaml" || return 1
     
-    # 复制 cookies 文件夹（如果存在）
-    COOKIES_DIR="$PROJECT_DIR/cookies"
-    if [ -d "$COOKIES_DIR" ]; then
-        log_ip "$ip" "复制 cookies 文件夹: $COOKIES_DIR -> $REMOTE_DIR/cookies/"
-        remote_copy "$COOKIES_DIR/" "$REMOTE_HOST:$REMOTE_DIR/cookies/" || return 1
+    # 复制 cookies 文件夹（如果存在且未指定 --skip-cookies）
+    if [ "$SKIP_COOKIES" != "true" ]; then
+        COOKIES_DIR="$PROJECT_DIR/cookies"
+        if [ -d "$COOKIES_DIR" ]; then
+            log_ip "$ip" "复制 cookies 文件夹: $COOKIES_DIR -> $REMOTE_DIR/cookies/"
+            remote_copy "$COOKIES_DIR/" "$REMOTE_HOST:$REMOTE_DIR/cookies/" || return 1
+        else
+            log_warn "[$ip] Cookies 文件夹不存在: $COOKIES_DIR，跳过..."
+        fi
     else
-        log_warn "[$ip] Cookies 文件夹不存在: $COOKIES_DIR，跳过..."
+        log_ip "$ip" "跳过 cookies 文件夹上传（--skip-cookies）"
     fi
     
     # 复制 scripts 文件夹
@@ -1258,23 +1286,16 @@ subtitle_for_ip() {
     local log_file="$REMOTE_DIR/subtitle.log"
     local error_log_file="$REMOTE_DIR/subtitle.error.log"
     
-    # 在后台执行，不等待返回
-    remote_exec "cd $REMOTE_DIR && nohup $REMOTE_DIR/blueberry subtitle > $log_file 2> $error_log_file < /dev/null &" || {
+    # 在后台执行，使用 setsid 确保进程完全脱离 SSH 会话，立即返回
+    # 使用 bash -c 和 () 来确保命令立即返回，不等待后台进程
+    remote_exec "cd $REMOTE_DIR && setsid bash -c 'nohup $REMOTE_DIR/blueberry subtitle > $log_file 2> $error_log_file < /dev/null &' > /dev/null 2>&1" || {
         log_error "[$ip] 启动 subtitle 命令失败"
         return 1
     }
     
-    # 等待一小段时间，确认进程已启动
-    sleep 1
-    
-    # 再次检查进程是否已启动
-    if remote_exec "ps aux | grep '$REMOTE_DIR/blueberry' | grep 'subtitle' | grep -v grep > /dev/null 2>&1"; then
-        log_ip "$ip" "✓ subtitle 命令已在后台启动（日志: $log_file, 错误日志: $error_log_file）"
-        return 0
-    else
-        log_error "[$ip] subtitle 命令启动失败，请检查日志: $error_log_file"
-        return 1
-    fi
+    # 立即返回，不等待进程启动确认（因为已经在后台运行）
+    log_ip "$ip" "✓ subtitle 命令已在后台启动（日志: $log_file, 错误日志: $error_log_file）"
+    return 0
 }
 
 # 处理所有 IP 的主函数
