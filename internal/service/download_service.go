@@ -85,12 +85,18 @@ func NewDownloadService(
 	return ds
 }
 
+// getDefaultSubtitleLanguages 获取默认字幕语言列表
+// 固定返回所有渠道都使用的字幕语言：en, id, ms, th, vn, zh-Hans
+func (s *downloadService) getDefaultSubtitleLanguages() []string {
+	// 固定使用这些语言，不再从配置文件读取
+	return []string{"en", "id", "ms", "th", "vn", "zh-Hans"}
+}
+
 // getChannelLanguages 获取指定频道配置的字幕语言列表
+// 固定返回所有渠道都使用的字幕语言，不再从配置文件读取
 func (s *downloadService) getChannelLanguages(channel *config.YouTubeChannel) []string {
-	if len(channel.Languages) > 0 {
-		return channel.Languages
-	}
-	return s.cfg.Subtitles.Languages
+	// 固定使用这些语言，不再从配置文件读取
+	return s.getDefaultSubtitleLanguages()
 }
 
 // parseChannel 解析单个频道并保存视频列表信息到目录下（内部方法）
@@ -839,7 +845,7 @@ func (s *downloadService) DownloadSingleVideo(ctx context.Context, videoURL stri
 	logger.Info().Str("video_url", videoURL).Msg("开始统一下载资源（视频/字幕/封面/信息）")
 
 	// 使用全局配置的语言列表
-	languages := s.cfg.Subtitles.Languages
+	languages := s.getDefaultSubtitleLanguages()
 	if len(languages) > 0 {
 		logger.Info().Strs("languages", languages).Msg("字幕语言")
 	}

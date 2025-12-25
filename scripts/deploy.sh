@@ -1100,11 +1100,56 @@ sync_output_for_ip() {
     log_ip "$ip" "从 $REMOTE_HOST:$remote_output_dir/ 同步到 $local_output_dir/"
     
     # 使用 rsync 同步（从远程到本地）
-    if rsync -azP -e "ssh $SSH_OPTS" "$REMOTE_HOST:$remote_output_dir/" "$local_output_dir/"; then
+    # 添加 --partial 和 --inplace 选项来处理部分传输和特殊字符
+    # 注意：macOS 的 rsync 2.6.9 不支持 --protect-args，所以不使用该选项
+    # 使用临时日志文件记录详细错误信息
+    local rsync_log="/tmp/rsync_output_${ip}_$$.log"
+    local rsync_exit_code=0
+    
+    rsync -azP --partial --inplace \
+        -e "ssh $SSH_OPTS" \
+        "$REMOTE_HOST:$remote_output_dir/" "$local_output_dir/" 2>&1 | tee "$rsync_log" || rsync_exit_code=${PIPESTATUS[0]}
+    
+    # 检查退出码
+    if [ $rsync_exit_code -eq 0 ]; then
         log_ip "$ip" "✓ output 目录同步完成"
+        rm -f "$rsync_log"
         return 0
+    elif [ $rsync_exit_code -eq 23 ]; then
+        # 错误代码 23：部分文件传输失败
+        log_warn "[$ip] output 目录部分文件同步失败（错误代码 23），检查详细日志"
+        
+        # 提取失败的文件信息
+        if [ -f "$rsync_log" ]; then
+            local failed_files=$(grep -iE "error|failed|cannot|skipping" "$rsync_log" | head -20)
+            if [ -n "$failed_files" ]; then
+                log_warn "[$ip] 同步失败的文件:"
+                echo "$failed_files" | while read -r line; do
+                    log_warn "[$ip]   $line"
+                done
+            fi
+        fi
+        
+        # 检查是否有文件成功传输
+        if [ -d "$local_output_dir" ] && [ "$(ls -A $local_output_dir 2>/dev/null)" ]; then
+            local synced_count=$(find "$local_output_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+            log_ip "$ip" "部分文件已成功同步（约 $synced_count 个文件），继续..."
+            rm -f "$rsync_log"
+            return 0
+        else
+            log_error "[$ip] 没有文件成功同步"
+            rm -f "$rsync_log"
+            return 1
+        fi
     else
-        log_error "[$ip] output 目录同步失败"
+        log_error "[$ip] output 目录同步失败（错误代码: $rsync_exit_code）"
+        if [ -f "$rsync_log" ]; then
+            log_error "[$ip] 错误详情:"
+            tail -20 "$rsync_log" | while read -r line; do
+                log_error "[$ip]   $line"
+            done
+        fi
+        rm -f "$rsync_log"
         return 1
     fi
 }
@@ -1133,18 +1178,61 @@ sync_meta_for_ip() {
     # 使用 rsync 同步，只包含 .description, .json, .srt 文件
     # --include 和 --exclude 的顺序很重要，先 include 再 exclude
     # 使用 --prune-empty-dirs 删除空目录
-    if rsync -azP -e "ssh $SSH_OPTS" \
+    # 添加 --partial 和 --inplace 选项来处理部分传输和特殊字符
+    # 注意：macOS 的 rsync 2.6.9 不支持 --protect-args，所以不使用该选项
+    local rsync_log="/tmp/rsync_meta_${ip}_$$.log"
+    local rsync_exit_code=0
+    
+    rsync -azP --partial --inplace \
+        -e "ssh $SSH_OPTS" \
         --include="*/" \
         --include="*.description" \
         --include="*.json" \
         --include="*.srt" \
         --exclude="*" \
         --prune-empty-dirs \
-        "$REMOTE_HOST:$remote_downloads_dir/" "$local_downloads_dir/"; then
+        "$REMOTE_HOST:$remote_downloads_dir/" "$local_downloads_dir/" 2>&1 | tee "$rsync_log" || rsync_exit_code=${PIPESTATUS[0]}
+    
+    # 检查退出码
+    if [ $rsync_exit_code -eq 0 ]; then
         log_ip "$ip" "✓ downloads 元数据文件同步完成"
+        rm -f "$rsync_log"
         return 0
+    elif [ $rsync_exit_code -eq 23 ]; then
+        # 错误代码 23：部分文件传输失败
+        log_warn "[$ip] downloads 元数据文件部分同步失败（错误代码 23），检查详细日志"
+        
+        # 提取失败的文件信息
+        if [ -f "$rsync_log" ]; then
+            local failed_files=$(grep -iE "error|failed|cannot|skipping" "$rsync_log" | head -20)
+            if [ -n "$failed_files" ]; then
+                log_warn "[$ip] 同步失败的文件:"
+                echo "$failed_files" | while read -r line; do
+                    log_warn "[$ip]   $line"
+                done
+            fi
+        fi
+        
+        # 检查是否有文件成功传输
+        if [ -d "$local_downloads_dir" ] && [ "$(ls -A $local_downloads_dir 2>/dev/null)" ]; then
+            local synced_count=$(find "$local_downloads_dir" -type f \( -name "*.description" -o -name "*.json" -o -name "*.srt" \) 2>/dev/null | wc -l | tr -d ' ')
+            log_ip "$ip" "部分文件已成功同步（约 $synced_count 个文件），继续..."
+            rm -f "$rsync_log"
+            return 0
+        else
+            log_error "[$ip] 没有文件成功同步"
+            rm -f "$rsync_log"
+            return 1
+        fi
     else
-        log_error "[$ip] downloads 元数据文件同步失败"
+        log_error "[$ip] downloads 元数据文件同步失败（错误代码: $rsync_exit_code）"
+        if [ -f "$rsync_log" ]; then
+            log_error "[$ip] 错误详情:"
+            tail -20 "$rsync_log" | while read -r line; do
+                log_error "[$ip]   $line"
+            done
+        fi
+        rm -f "$rsync_log"
         return 1
     fi
 }

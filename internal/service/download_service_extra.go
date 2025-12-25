@@ -616,7 +616,7 @@ func (s *downloadService) DownloadVideoDir(ctx context.Context, videoDir string)
 		if channel != nil {
 			languages = s.getChannelLanguages(channel)
 		} else {
-			languages = s.cfg.Subtitles.Languages
+			languages = s.getDefaultSubtitleLanguages()
 		}
 	} else {
 		logger.Info().Strs("languages", languages).Msg("从 download_status.json 读取字幕语言")
@@ -636,7 +636,7 @@ func (s *downloadService) DownloadVideoDir(ctx context.Context, videoDir string)
 		if channel != nil {
 			languages = s.getChannelLanguages(channel)
 		} else {
-			languages = s.cfg.Subtitles.Languages
+			languages = s.getDefaultSubtitleLanguages()
 		}
 		logger.Info().Strs("languages", languages).Msg("使用配置中的字幕语言")
 	}
