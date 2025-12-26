@@ -107,6 +107,8 @@ type YouTubeConfig struct {
 	BotDetectionThreshold int `mapstructure:"bot_detection_threshold"`
 	// BotDetectionRestDuration 机器人检测后的休息时长（分钟），默认 6 小时（360分钟），实际休息时间会在此基础上随机增加 0-10%
 	BotDetectionRestDuration int `mapstructure:"bot_detection_rest_duration"`
+	// CleanupPartialFilesOnFailure 下载失败时是否清理部分下载的文件（.part, .ytdl 等），默认 false（不清理）
+	CleanupPartialFilesOnFailure bool `mapstructure:"cleanup_partial_files_on_failure"`
 	// 运行期覆盖（命令行优先于配置），不从配置文件读取
 	LimitOverride  int `mapstructure:"-"`
 	OffsetOverride int `mapstructure:"-"`

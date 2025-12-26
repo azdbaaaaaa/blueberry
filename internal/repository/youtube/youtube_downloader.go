@@ -215,7 +215,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 							}
 							outputStr = outputBuilder.String()
 							err = waitErr
-							
+
 							// 检查输出中是否有 "Sleeping" 字样，如果有，说明可能还在 sleep 等待中
 							// 如果 cmd.Wait() 返回了，说明进程已经结束
 							// 但如果输出最后是 "Sleeping"，说明进程可能在 sleep 期间被终止了
@@ -224,7 +224,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 							hasSleeping := strings.Contains(outputLower, "[download] sleeping") ||
 								strings.Contains(outputLower, "sleeping") ||
 								strings.Contains(outputLower, "sleep ")
-							
+
 							// 如果输出中有 "Sleeping" 且命令返回了错误或非零退出码，说明可能在 sleep 期间被终止
 							// 检查是否有 .part 文件，如果有，说明下载可能还没完成，应该等待更长时间
 							if hasSleeping {
@@ -240,7 +240,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 									// 不立即返回错误，让后续的 findVideoFileWithRetry 处理
 								}
 							}
-							
+
 							// 记录命令完成信息
 							exitCode := 0
 							if waitErr != nil {
@@ -1311,9 +1311,11 @@ func (d *downloader) stripResolutionFromSubtitleFilenames(videoDir string, subti
 
 // findVideoFileWithRetry 查找视频文件，如果找不到则检查是否有 .part 文件，如果有则等待后重试
 // 如果检测到文件大小还在变化，说明还在下载中，需要等待更长时间
+// 对于大文件，合并时间可能较长，因此增加重试次数和等待时间
 func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, error) {
-	const maxRetries = 6  // 增加重试次数，因为 HLS 下载可能需要更长时间合并
-	const retryDelay = 10 * time.Second  // 增加等待时间
+	const maxRetries = 12                   // 增加重试次数，大文件合并可能需要更长时间
+	const baseRetryDelay = 15 * time.Second // 基础等待时间
+	const maxRetryDelay = 60 * time.Second  // 最大等待时间（随重试次数递增）
 
 	var lastPartFileSize int64 = -1
 	var lastPartFileTime time.Time
@@ -1390,17 +1392,24 @@ func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, e
 		}
 
 		// 有 .part 文件，说明还在下载或合并中，等待后重试
+		// 对于大文件，使用递增的等待时间（前几次较短，后面逐渐增加）
 		if i < maxRetries-1 {
+			// 计算当前重试的等待时间（递增，但不超过最大值）
+			currentDelay := baseRetryDelay * time.Duration(i+1)
+			if currentDelay > maxRetryDelay {
+				currentDelay = maxRetryDelay
+			}
+
 			logger.Info().
 				Str("video_dir", videoDir).
 				Str("video_id", videoID).
 				Int("retry", i+1).
 				Int("max_retries", maxRetries).
-				Dur("delay", retryDelay).
+				Dur("delay", currentDelay).
 				Strs("part_files", matches).
 				Int64("part_file_size", largestSize).
-				Msg("检测到 .part 文件，等待文件下载/合并完成")
-			time.Sleep(retryDelay)
+				Msg("检测到 .part 文件，等待文件下载/合并完成（大文件合并可能需要更长时间）")
+			time.Sleep(currentDelay)
 		}
 	}
 

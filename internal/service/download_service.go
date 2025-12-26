@@ -1072,11 +1072,15 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 
 		result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
 		if err != nil {
-			// 下载失败，清理部分下载的文件（.part, .ytdl 等）
-			if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
-				logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+			// 下载失败，根据配置决定是否清理部分下载的文件（.part, .ytdl 等）
+			if s.cfg != nil && s.cfg.YouTube.CleanupPartialFilesOnFailure {
+				if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
+					logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+				} else {
+					logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+				}
 			} else {
-				logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+				logger.Debug().Str("video_dir", videoDir).Msg("下载失败，但配置为不清理部分下载文件（cleanup_partial_files_on_failure=false）")
 			}
 
 			// 下载失败，更新状态为 failed
@@ -1121,11 +1125,15 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			// 执行下载
 			result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
 			if err != nil {
-				// 下载失败，清理部分下载的文件（.part, .ytdl 等）
-				if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
-					logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+				// 下载失败，根据配置决定是否清理部分下载的文件（.part, .ytdl 等）
+				if s.cfg != nil && s.cfg.YouTube.CleanupPartialFilesOnFailure {
+					if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
+						logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+					} else {
+						logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+					}
 				} else {
-					logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+					logger.Debug().Str("video_dir", videoDir).Msg("下载失败，但配置为不清理部分下载文件（cleanup_partial_files_on_failure=false）")
 				}
 
 				// 下载失败，更新状态为 failed
