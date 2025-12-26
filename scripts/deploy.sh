@@ -32,7 +32,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, sync-meta, organize, subtitle"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize, subtitle"
     echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
     echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -48,8 +48,7 @@ if [ $# -lt 1 ]; then
     echo "  disable  - 禁用服务自启动"
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
-    echo "  sync     - 同步远程服务器的 output 目录到本地，并收集网卡流量详细信息"
-    echo "  sync-meta - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地"
+    echo "  sync     - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地，并收集网卡流量详细信息"
     echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
     echo "  subtitle - 在远程服务器上后台执行 subtitle 命令（如果已在执行则跳过）"
     echo ""
@@ -82,7 +81,7 @@ SKIP_COOKIES=false
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|sync-meta|organize|subtitle)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize|subtitle)
             ACTIONS+=("$1")
             shift
             ;;
@@ -604,10 +603,337 @@ with open('$counters_file', 'w') as f:
     return 0
 }
 
+# 生成 sync 操作的汇总文件
+generate_sync_summary() {
+    local date_str=$(date +%Y%m%d)
+    local output_dir="$PROJECT_DIR/output-${date_str}"
+    
+    # 生成下载统计汇总
+    local download_stats_dir="$output_dir/download_stats"
+    local download_summary_file="$download_stats_dir/summary.json"
+    
+    if [ -d "$download_stats_dir" ]; then
+        local download_summary=$(python3 << PYTHON_EOF
+import os
+import json
+import glob
+
+download_stats_dir = "$download_stats_dir"
+summary = {
+    "total_servers": 0,
+    "total_videos": 0,
+    "total_downloaded_videos": 0,
+    "total_uploaded_videos": 0,
+    "total_uploaded_with_subtitles": 0,
+    "servers": []
+}
+
+# 遍历所有下载统计文件（排除 summary.json）
+for stats_file in glob.glob(os.path.join(download_stats_dir, "*.json")):
+    if os.path.basename(stats_file) == "summary.json":
+        continue
+    
+    try:
+        with open(stats_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if 'error' in data:
+                continue
+            
+            summary["total_servers"] += 1
+            summary["total_videos"] += data.get("total_videos", 0)
+            summary["total_downloaded_videos"] += data.get("downloaded_videos", 0)
+            summary["total_uploaded_videos"] += data.get("uploaded_videos", 0)
+            summary["total_uploaded_with_subtitles"] += data.get("uploaded_with_subtitles", 0)
+            
+            # 从文件名中提取 IP
+            filename = os.path.basename(stats_file)
+            server_ip = ""
+            if ".download_stats_" in filename:
+                server_ip = filename.split(".download_stats_")[-1].replace(".json", "")
+            elif "download_stats_" in filename:
+                server_ip = filename.replace("download_stats_", "").replace(".json", "")
+            
+            summary["servers"].append({
+                "server_ip": server_ip,
+                "total_videos": data.get("total_videos", 0),
+                "downloaded_videos": data.get("downloaded_videos", 0),
+                "uploaded_videos": data.get("uploaded_videos", 0),
+                "uploaded_with_subtitles": data.get("uploaded_with_subtitles", 0)
+            })
+    except:
+        pass
+
+print(json.dumps(summary, indent=2, ensure_ascii=False))
+PYTHON_EOF
+)
+        
+        if [ -n "$download_summary" ]; then
+            echo "$download_summary" > "$download_summary_file"
+            log_info "下载统计汇总已保存到: $download_summary_file"
+        fi
+    fi
+    
+    # 生成流量统计汇总
+    local traffic_stats_dir="$output_dir/traffic_stats"
+    local traffic_summary_file="$traffic_stats_dir/summary.json"
+    
+    if [ -d "$traffic_stats_dir" ]; then
+        local traffic_summary=$(python3 << PYTHON_EOF
+import os
+import json
+import glob
+
+traffic_stats_dir = "$traffic_stats_dir"
+summary = {
+    "total_servers": 0,
+    "total_rx_bytes": 0,
+    "total_tx_bytes": 0,
+    "total_bytes": 0,
+    "total_rx_gb": 0.0,
+    "total_tx_gb": 0.0,
+    "total_gb": 0.0,
+    "total_rx_tb": 0.0,
+    "total_tx_tb": 0.0,
+    "total_tb": 0.0,
+    "servers": []
+}
+
+# 遍历所有流量统计文件（排除 summary.json）
+for stats_file in glob.glob(os.path.join(traffic_stats_dir, "*.json")):
+    if os.path.basename(stats_file) == "summary.json":
+        continue
+    
+    try:
+        with open(stats_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if 'error' in data:
+                continue
+            
+            summary["total_servers"] += 1
+            summary["total_rx_bytes"] += data.get("total_rx_bytes", 0)
+            summary["total_tx_bytes"] += data.get("total_tx_bytes", 0)
+            summary["total_bytes"] += data.get("total_bytes", 0)
+            summary["total_rx_gb"] += data.get("total_rx_gb", 0.0)
+            summary["total_tx_gb"] += data.get("total_tx_gb", 0.0)
+            summary["total_gb"] += data.get("total_gb", 0.0)
+            summary["total_rx_tb"] += data.get("total_rx_tb", 0.0)
+            summary["total_tx_tb"] += data.get("total_tx_tb", 0.0)
+            summary["total_tb"] += data.get("total_tb", 0.0)
+            
+            summary["servers"].append({
+                "server_ip": data.get("server_ip", ""),
+                "server_number": data.get("server_number", ""),
+                "total_rx_bytes": data.get("total_rx_bytes", 0),
+                "total_tx_bytes": data.get("total_tx_bytes", 0),
+                "total_bytes": data.get("total_bytes", 0),
+                "total_rx_gb": data.get("total_rx_gb", 0.0),
+                "total_tx_gb": data.get("total_tx_gb", 0.0),
+                "total_gb": data.get("total_gb", 0.0)
+            })
+    except:
+        pass
+
+print(json.dumps(summary, indent=2, ensure_ascii=False))
+PYTHON_EOF
+)
+        
+        if [ -n "$traffic_summary" ]; then
+            echo "$traffic_summary" > "$traffic_summary_file"
+            log_info "流量统计汇总已保存到: $traffic_summary_file"
+        fi
+    fi
+}
+
+# 从配置文件名中提取编号
+extract_server_number() {
+    local config_file="$1"
+    if [ -z "$config_file" ]; then
+        echo ""
+        return
+    fi
+    # 从配置文件名中提取编号（格式: <编号>.config-<IP>.yaml）
+    local number=$(echo "$config_file" | sed -n 's/^\([0-9][0-9]*\)\.config-.*\.yaml$/\1/p')
+    if [ -z "$number" ]; then
+        # 如果没有编号，返回空字符串
+        echo ""
+    else
+        echo "$number"
+    fi
+}
+
+# 收集下载统计信息（针对单个 IP）
+collect_download_stats_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    # 检查 SSH 连接是否成功
+    if ! remote_exec "echo 'SSH connection test'" >/dev/null 2>&1; then
+        log_warn "[$ip] SSH 连接失败，跳过收集下载统计信息"
+        return 1
+    fi
+    
+    log_ip "$ip" "收集下载统计信息..."
+    
+    local remote_downloads_dir="$REMOTE_DIR/downloads"
+    local date_str=$(date +%Y%m%d)
+    local output_dir="$PROJECT_DIR/output-${date_str}/download_stats"
+    mkdir -p "$output_dir"
+    
+    # 从配置文件名中提取编号
+    local server_number=$(extract_server_number "$CONFIG_FILE")
+    if [ -z "$server_number" ]; then
+        # 如果没有编号，使用 IP 作为文件名
+        local stats_file="$output_dir/download_stats_${ip}.json"
+    else
+        local stats_file="$output_dir/${server_number}.download_stats_${ip}.json"
+    fi
+    
+    # 在远程服务器上执行统计脚本
+    # 使用 Python 来解析 JSON 文件并统计
+    local stats_json=$(remote_exec "cd $remote_downloads_dir && python3 << PYTHON_EOF
+import os
+import json
+import glob
+from pathlib import Path
+
+stats = {
+    'total_videos': 0,
+    'downloaded_videos': 0,
+    'uploaded_videos': 0,
+    'uploaded_with_subtitles': 0,
+    'channels': {}
+}
+
+downloads_dir = '$remote_downloads_dir'
+
+# 遍历所有频道目录
+for channel_dir in glob.glob(os.path.join(downloads_dir, '*')):
+    if not os.path.isdir(channel_dir):
+        continue
+    
+    channel_id = os.path.basename(channel_dir)
+    if channel_id == '.global':
+        continue
+    
+    channel_stats = {
+        'total_videos': 0,
+        'downloaded_videos': 0,
+        'uploaded_videos': 0,
+        'uploaded_with_subtitles': 0
+    }
+    
+    # 遍历频道下的所有视频目录
+    for video_dir in glob.glob(os.path.join(channel_dir, '*')):
+        if not os.path.isdir(video_dir):
+            continue
+        
+        stats['total_videos'] += 1
+        channel_stats['total_videos'] += 1
+        
+        # 检查下载状态
+        download_status_file = os.path.join(video_dir, 'download_status.json')
+        if os.path.exists(download_status_file):
+            try:
+                with open(download_status_file, 'r', encoding='utf-8') as f:
+                    download_status = json.load(f)
+                    if isinstance(download_status.get('video'), dict):
+                        if download_status['video'].get('downloaded', False):
+                            stats['downloaded_videos'] += 1
+                            channel_stats['downloaded_videos'] += 1
+                    elif isinstance(download_status.get('video'), bool):
+                        if download_status['video']:
+                            stats['downloaded_videos'] += 1
+                            channel_stats['downloaded_videos'] += 1
+            except:
+                pass
+        
+        # 检查上传状态
+        upload_status_file = os.path.join(video_dir, 'upload_status.json')
+        is_uploaded = False
+        if os.path.exists(upload_status_file):
+            try:
+                with open(upload_status_file, 'r', encoding='utf-8') as f:
+                    upload_status = json.load(f)
+                    if upload_status.get('bilibili_aid'):
+                        is_uploaded = True
+                        stats['uploaded_videos'] += 1
+                        channel_stats['uploaded_videos'] += 1
+            except:
+                pass
+        
+        # 检查是否有字幕（上传完成的视频）
+        if is_uploaded:
+            subtitle_files = []
+            # 查找 .srt 和 .vtt 文件
+            for ext in ['*.srt', '*.vtt']:
+                subtitle_files.extend(glob.glob(os.path.join(video_dir, ext)))
+            
+            if len(subtitle_files) > 0:
+                stats['uploaded_with_subtitles'] += 1
+                channel_stats['uploaded_with_subtitles'] += 1
+    
+    if channel_stats['total_videos'] > 0:
+        stats['channels'][channel_id] = channel_stats
+
+print(json.dumps(stats, indent=2, ensure_ascii=False))
+PYTHON_EOF
+" 2>&1)
+    
+    if [ $? -eq 0 ] && [ -n "$stats_json" ]; then
+        # 检查返回的 JSON 是否包含错误
+        if echo "$stats_json" | grep -q '"error"'; then
+            log_warn "[$ip] 收集下载统计信息失败"
+            return 1
+        fi
+        
+        # 保存统计信息到文件
+        echo "$stats_json" > "$stats_file"
+        log_ip "$ip" "✓ 下载统计信息已保存到: $stats_file"
+        
+        # 解析并显示统计信息（使用 Python 解析 JSON，更可靠）
+        local stats_summary=$(echo "$stats_json" | python3 -c "
+import sys
+import json
+try:
+    data = json.load(sys.stdin)
+    print(f\"{data.get('total_videos', 0)}\")
+    print(f\"{data.get('downloaded_videos', 0)}\")
+    print(f\"{data.get('uploaded_videos', 0)}\")
+    print(f\"{data.get('uploaded_with_subtitles', 0)}\")
+except:
+    print('0')
+    print('0')
+    print('0')
+    print('0')
+" 2>/dev/null)
+        
+        local total_videos=$(echo "$stats_summary" | sed -n '1p')
+        local downloaded=$(echo "$stats_summary" | sed -n '2p')
+        local uploaded=$(echo "$stats_summary" | sed -n '3p')
+        local uploaded_with_subs=$(echo "$stats_summary" | sed -n '4p')
+        
+        log_ip "$ip" "  总视频数: ${total_videos:-0}"
+        log_ip "$ip" "  下载完成: ${downloaded:-0}"
+        log_ip "$ip" "  上传完成: ${uploaded:-0}"
+        log_ip "$ip" "  上传完成且有字幕: ${uploaded_with_subs:-0}"
+        
+        return 0
+    else
+        log_warn "[$ip] 收集下载统计信息失败"
+        return 1
+    fi
+}
+
 # 收集网卡流量信息（针对单个 IP）
 collect_network_stats_for_ip() {
     local ip=$1
     setup_ssh_for_ip "$ip"
+    
+    # 检查 SSH 连接是否成功
+    if ! remote_exec "echo 'SSH connection test'" >/dev/null 2>&1; then
+        log_warn "[$ip] SSH 连接失败，跳过收集网卡流量信息"
+        return 1
+    fi
     
     log_ip "$ip" "收集网卡流量信息..."
     
@@ -617,19 +943,21 @@ collect_network_stats_for_ip() {
     
     if [ -z "$network_stats" ]; then
         log_warn "[$ip] 无法获取网卡流量信息"
-        echo "=== 服务器: $ip ===" >> "$NETWORK_STATS_DETAIL_FILE"
-        echo "错误: 无法获取网卡流量信息" >> "$NETWORK_STATS_DETAIL_FILE"
-        echo "" >> "$NETWORK_STATS_DETAIL_FILE"
         return 1
     fi
     
-    # 保存原始输出到详细文件
-    echo "=== 服务器: $ip ===" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "收集时间: $(date '+%Y-%m-%d %H:%M:%S')" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "原始输出 (/proc/net/dev):" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "$network_stats" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    # 保存为 JSON 格式到 traffic_stats 文件夹
+    local date_str=$(date +%Y%m%d)
+    local output_dir="$PROJECT_DIR/output-${date_str}/traffic_stats"
+    mkdir -p "$output_dir"
+    
+    # 从配置文件名中提取编号
+    local server_number=$(extract_server_number "$CONFIG_FILE")
+    if [ -z "$server_number" ]; then
+        local traffic_file="$output_dir/traffic_stats_${ip}.json"
+    else
+        local traffic_file="$output_dir/${server_number}.traffic_stats_${ip}.json"
+    fi
     
     # 解析并计算总流量
     local total_rx_bytes=0
@@ -666,19 +994,39 @@ collect_network_stats_for_ip() {
     local rx_tb=$(echo "scale=2; $total_rx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
     local tx_tb=$(echo "scale=2; $total_tx_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
     
-    echo "统计信息:" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "  网卡数量: $interface_count" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "  总接收流量: $(printf "%'d" $total_rx_bytes) 字节 ($rx_gb GB / $rx_tb TB)" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "  总发送流量: $(printf "%'d" $total_tx_bytes) 字节 ($tx_gb GB / $tx_tb TB)" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "  总流量: $(printf "%'d" $((total_rx_bytes + total_tx_bytes))) 字节 ($(echo "scale=2; ($total_rx_bytes + $total_tx_bytes) / 1073741824" | bc 2>/dev/null || echo "0") GB)" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "========================================" >> "$NETWORK_STATS_DETAIL_FILE"
-    echo "" >> "$NETWORK_STATS_DETAIL_FILE"
+    # 保存为 JSON 格式
+    local total_bytes=$((total_rx_bytes + total_tx_bytes))
+    local total_gb=$(echo "scale=2; $total_bytes / 1073741824" | bc 2>/dev/null || echo "0")
+    local total_tb=$(echo "scale=2; $total_bytes / 1099511627776" | bc 2>/dev/null || echo "0")
     
-    # 返回统计信息（用于汇总）- 输出到 stdout
-    echo "$ip|$total_rx_bytes|$total_tx_bytes|$interface_count"
+    local traffic_json=$(python3 << PYTHON_EOF
+import json
+
+traffic_data = {
+    "server_ip": "$ip",
+    "server_number": "${server_number:-}",
+    "interface_count": $interface_count,
+    "total_rx_bytes": $total_rx_bytes,
+    "total_tx_bytes": $total_tx_bytes,
+    "total_rx_gb": float("$rx_gb"),
+    "total_tx_gb": float("$tx_gb"),
+    "total_rx_tb": float("$rx_tb"),
+    "total_tx_tb": float("$tx_tb"),
+    "total_bytes": $total_bytes,
+    "total_gb": float("$total_gb"),
+    "total_tb": float("$total_tb")
+}
+
+print(json.dumps(traffic_data, indent=2, ensure_ascii=False))
+PYTHON_EOF
+)
     
-    log_ip "$ip" "✓ 网卡流量信息收集完成" >&2
+    if [ -n "$traffic_json" ]; then
+        echo "$traffic_json" > "$traffic_file"
+        log_ip "$ip" "✓ 网卡流量信息已保存到: $traffic_file"
+    fi
+    
+    log_ip "$ip" "✓ 网卡流量信息已收集（网卡数: $interface_count, 接收: $rx_gb GB, 发送: $tx_gb GB）"
     return 0
 }
 
@@ -1305,30 +1653,8 @@ process_all_ips() {
     local fail_count=0
     local failed_ips=()
     
-    # 对于 sync 操作，初始化网卡流量统计文件
-    # 注意：这些变量需要是全局的，因为 collect_network_stats_for_ip 函数需要使用它们
-    NETWORK_STATS_DETAIL_FILE=""
-    NETWORK_STATS_SUMMARY_FILE=""
-    NETWORK_STATS_TEMP=""
-    if [ "$action" = "sync" ]; then
-        local date_str=$(date +%Y%m%d)
-        NETWORK_STATS_DETAIL_FILE="$PROJECT_DIR/output/1.network_stats_detail_${date_str}.txt"
-        NETWORK_STATS_SUMMARY_FILE="$PROJECT_DIR/output/1.network_stats_summary_${date_str}.txt"
-        NETWORK_STATS_TEMP=$(mktemp)
-        mkdir -p "$PROJECT_DIR/output"
-        # 创建详细文件并写入标题
-        cat > "$NETWORK_STATS_DETAIL_FILE" <<EOF
-========================================
-网卡流量统计详细明细
-========================================
-收集时间: $(date '+%Y-%m-%d %H:%M:%S')
-服务器数量: ${#IPS[@]}
-服务器列表: ${IPS[*]}
-
-EOF
-        log_info "网卡流量详细统计将保存到: $NETWORK_STATS_DETAIL_FILE"
-        log_info "网卡流量汇总统计将保存到: $NETWORK_STATS_SUMMARY_FILE"
-    fi
+    # 对于 sync 操作，不再生成文本格式的详细统计文件
+    # 流量统计已改为 JSON 格式保存到 traffic_stats 文件夹
     
     log_info "处理 ${#IPS[@]} 个服务器: ${IPS[*]}"
     echo ""
@@ -1445,12 +1771,13 @@ EOF
                 fi
                 ;;
             sync)
-                # sync 操作包括：同步 output 目录 + 收集网卡流量详细信息
+                # sync 操作包括：同步 downloads 元数据文件 + 收集网卡流量详细信息 + 收集下载统计信息
                 local sync_success=true
                 local stats_success=true
+                local download_stats_success=true
                 
-                # 同步 output 目录
-                if ! sync_output_for_ip "$ip"; then
+                # 同步 downloads 目录下的元数据文件（.description, .json, .srt）
+                if ! sync_meta_for_ip "$ip"; then
                     sync_success=false
                 fi
                 
@@ -1460,16 +1787,13 @@ EOF
                     log_warn "[$ip] 收集网卡流量信息失败"
                 fi
                 
-                if [ "$sync_success" = true ] && [ "$stats_success" = true ]; then
-                    ((success_count++))
-                else
-                    ((fail_count++))
-                    failed_ips+=("$ip")
+                # 收集下载统计信息
+                if ! collect_download_stats_for_ip "$ip"; then
+                    download_stats_success=false
+                    log_warn "[$ip] 收集下载统计信息失败"
                 fi
-                ;;
-            sync-meta)
-                # sync-meta 操作：同步 downloads 目录下的元数据文件（.description, .json, .srt）
-                if sync_meta_for_ip "$ip"; then
+                
+                if [ "$sync_success" = true ] && [ "$stats_success" = true ] && [ "$download_stats_success" = true ]; then
                     ((success_count++))
                 else
                     ((fail_count++))
@@ -1518,7 +1842,11 @@ EOF
         echo ""
     done
     
-    # 对于 sync 操作，不需要额外处理（只收集详细信息）
+    # 对于 sync 操作，生成汇总文件
+    if [ "$action" = "sync" ]; then
+        generate_sync_summary
+    fi
+    
     # 对于 organize 操作，已经在循环中处理，这里不需要额外操作
     
     # 输出总结

@@ -68,43 +68,9 @@ var organizeCmd = &cobra.Command{
 
 		logger.Info().Str("archive_dir", archiveDir).Msg("开始整理 output 目录")
 
-		// 1. 生成流量汇总统计
-		networkStatsDir := filepath.Join(projectRoot, "output")
-		detailFile := filepath.Join(networkStatsDir, fmt.Sprintf("1.network_stats_detail_%s.txt", dateStr))
-		if _, err := os.Stat(detailFile); err == nil {
-			if err := generateNetworkStatsSummary(detailFile, dateStr, projectRoot); err != nil {
-				logger.Warn().Err(err).Msg("生成流量汇总统计失败，继续执行")
-			}
-		} else {
-			logger.Debug().Str("file", detailFile).Msg("详细统计文件不存在，跳过生成汇总")
-		}
+		// 1. 移动流量统计文件（从 output 目录）- 已移除，流量统计现在保存在 output-日期/traffic_stats/ 中
 
-		// 2. 移动流量统计文件（从 output 目录）
-		if statsDir, err := os.Stat(networkStatsDir); err == nil && statsDir.IsDir() {
-			movedStats := 0
-			entries, err := os.ReadDir(networkStatsDir)
-			if err == nil {
-				for _, entry := range entries {
-					if entry.IsDir() {
-						continue
-					}
-					name := entry.Name()
-					if strings.HasPrefix(name, "1.network_stats") && strings.HasSuffix(name, ".txt") {
-						src := filepath.Join(networkStatsDir, name)
-						dst := filepath.Join(archiveDir, name)
-						if err := os.Rename(src, dst); err == nil {
-							logger.Info().Str("file", name).Msg("已移动流量统计文件")
-							movedStats++
-						}
-					}
-				}
-			}
-			if movedStats == 0 {
-				logger.Warn().Msg("未找到流量统计文件")
-			}
-		}
-
-		// 3. 遍历 downloads 目录整理字幕文件
+		// 2. 遍历 downloads 目录整理字幕文件
 		downloadsStat, err := os.Stat(absDownloadsDir)
 		if err != nil || !downloadsStat.IsDir() {
 			logger.Warn().Str("dir", downloadsDir).Msg("downloads 目录不存在，跳过字幕整理")
@@ -118,6 +84,16 @@ var organizeCmd = &cobra.Command{
 		skippedNotUploaded := 0      // 还没有上传成功的
 		totalScanned := 0            // 总共扫描的视频目录数量
 		copiedCount := 0
+
+		// 频道统计信息
+		type ChannelStats struct {
+			ChannelID        string `json:"channel_id"`
+			TotalVideos      int    `json:"total_videos"`
+			DownloadedVideos int    `json:"downloaded_videos"`
+			TotalSubtitles   int    `json:"total_subtitles"`
+			UploadedVideos   int    `json:"uploaded_videos"`
+		}
+		channelStatsList := make([]ChannelStats, 0)
 
 		// 遍历所有频道目录
 		channelEntries, err := os.ReadDir(absDownloadsDir)
@@ -141,6 +117,15 @@ var organizeCmd = &cobra.Command{
 
 			logger.Info().Str("channel_id", channelID).Msg("处理频道")
 
+			// 初始化频道统计
+			channelStats := ChannelStats{
+				ChannelID:        channelID,
+				TotalVideos:      0,
+				DownloadedVideos: 0,
+				TotalSubtitles:   0,
+				UploadedVideos:   0,
+			}
+
 			// 遍历频道下的所有视频目录
 			videoEntries, err := os.ReadDir(channelDir)
 			if err != nil {
@@ -155,6 +140,25 @@ var organizeCmd = &cobra.Command{
 
 				totalScanned++ // 统计扫描的视频目录数量
 				videoDir := filepath.Join(channelDir, videoEntry.Name())
+
+				// 统计频道信息
+				channelStats.TotalVideos++
+
+				// 检查视频下载状态
+				if fileRepo.IsVideoDownloaded(videoDir) {
+					channelStats.DownloadedVideos++
+				}
+
+				// 检查上传状态
+				if fileRepo.IsVideoUploaded(videoDir) {
+					channelStats.UploadedVideos++
+				}
+
+				// 统计字幕数量
+				subtitleFilesForStats, err := fileRepo.FindSubtitleFiles(videoDir)
+				if err == nil {
+					channelStats.TotalSubtitles += len(subtitleFilesForStats)
+				}
 
 				// 检查是否已经 organize 过（除非使用 --force）
 				organizeMarker := filepath.Join(videoDir, ".organized")
@@ -347,6 +351,34 @@ var organizeCmd = &cobra.Command{
 					processedCount++
 				}
 			}
+
+			// 将频道统计添加到列表
+			channelStatsList = append(channelStatsList, channelStats)
+			logger.Info().
+				Str("channel_id", channelID).
+				Int("total_videos", channelStats.TotalVideos).
+				Int("downloaded_videos", channelStats.DownloadedVideos).
+				Int("total_subtitles", channelStats.TotalSubtitles).
+				Int("uploaded_videos", channelStats.UploadedVideos).
+				Msg("频道统计")
+		}
+
+		// 保存频道统计到文件
+		if len(channelStatsList) > 0 {
+			statsData, err := json.MarshalIndent(channelStatsList, "", "  ")
+			if err == nil {
+				statsFile := filepath.Join(archiveDir, "channel_stats.json")
+				if err := os.WriteFile(statsFile, statsData, 0644); err == nil {
+					logger.Info().
+						Str("stats_file", statsFile).
+						Int("channel_count", len(channelStatsList)).
+						Msg("已保存频道统计信息")
+				} else {
+					logger.Warn().Err(err).Str("stats_file", statsFile).Msg("保存频道统计信息失败")
+				}
+			} else {
+				logger.Warn().Err(err).Msg("序列化频道统计信息失败")
+			}
 		}
 
 		logger.Info().
@@ -362,8 +394,10 @@ var organizeCmd = &cobra.Command{
 	},
 }
 
-// generateNetworkStatsSummary 从详细统计文件中生成汇总统计
+// generateNetworkStatsSummary 从详细统计文件中生成汇总统计（已废弃，流量统计现在使用 JSON 格式）
+// 保留函数定义以避免编译错误，但不再使用
 func generateNetworkStatsSummary(detailFile, dateStr, projectRoot string) error {
+	return nil // 不再生成文本格式的汇总统计
 	logger.Info().Str("detail_file", detailFile).Msg("生成流量汇总统计")
 
 	// 读取详细文件内容

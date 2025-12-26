@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog/log"
 )
 
 type uploadCounters struct {
@@ -87,6 +89,8 @@ type Repository interface {
 	FindCoverFile(videoDir string) (string, error)
 	// 从 download_status.json 中提取字幕语言列表
 	GetSubtitleLanguagesFromStatus(videoDir string) ([]string, error)
+	// 清理部分下载的文件（.part, .ytdl 等）
+	CleanupPartialFiles(videoDir string) error
 	// 账号上传计数
 	GetTodayUploadCount(account string) (int, error)
 	IncrementTodayUploadCount(account string) error
@@ -1284,6 +1288,58 @@ func (r *repository) FindCoverFile(videoDir string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("未找到封面图文件")
+}
+
+// CleanupPartialFiles 清理部分下载的文件（.part, .ytdl 等）
+func (r *repository) CleanupPartialFiles(videoDir string) error {
+	// 使用文件系统遍历来查找所有包含 .part 的文件，因为 glob 模式可能无法匹配所有格式
+	// 例如：EVCCDM75Suk_1080p.mp4.part-Frag1222.part 这种嵌套格式
+	var filesToDelete []string
+
+	// 读取目录中的所有文件
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		return fmt.Errorf("读取目录失败: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileName := entry.Name()
+		// 检查文件名中是否包含 .part 或 .ytdl
+		if strings.Contains(fileName, ".part") || strings.Contains(fileName, ".ytdl") {
+			filePath := filepath.Join(videoDir, fileName)
+			filesToDelete = append(filesToDelete, filePath)
+		}
+	}
+
+	if len(filesToDelete) == 0 {
+		return nil
+	}
+
+	// 删除所有找到的部分下载文件
+	deletedCount := 0
+	for _, file := range filesToDelete {
+		if err := os.Remove(file); err != nil {
+			// 记录错误但继续删除其他文件
+			log.Warn().Err(err).Str("file", file).Msg("删除部分下载文件失败")
+		} else {
+			log.Info().Str("file", file).Msg("已删除部分下载文件")
+			deletedCount++
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Info().
+			Str("video_dir", videoDir).
+			Int("deleted_count", deletedCount).
+			Int("total_found", len(filesToDelete)).
+			Msg("清理部分下载文件完成")
+	}
+
+	return nil
 }
 
 // GetSubtitleLanguagesFromStatus 从 download_status.json 中提取字幕语言列表

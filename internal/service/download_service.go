@@ -1072,6 +1072,13 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 
 		result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
 		if err != nil {
+			// 下载失败，清理部分下载的文件（.part, .ytdl 等）
+			if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
+				logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+			} else {
+				logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+			}
+
 			// 下载失败，更新状态为 failed
 			errorMsg := err.Error()
 			if markErr := s.fileManager.MarkVideoFailed(videoDir, errorMsg); markErr != nil {
@@ -1114,6 +1121,13 @@ func (s *downloadService) downloadVideoAndSaveInfo(
 			// 执行下载
 			result, err := s.downloader.DownloadVideo(ctx, channelID, videoURL, languages, title)
 			if err != nil {
+				// 下载失败，清理部分下载的文件（.part, .ytdl 等）
+				if cleanupErr := s.fileManager.CleanupPartialFiles(videoDir); cleanupErr != nil {
+					logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+				} else {
+					logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件")
+				}
+
 				// 下载失败，更新状态为 failed
 				errorMsg := err.Error()
 				if markErr := s.fileManager.MarkVideoFailed(videoDir, errorMsg); markErr != nil {

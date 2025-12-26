@@ -215,6 +215,32 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 							}
 							outputStr = outputBuilder.String()
 							err = waitErr
+							
+							// 检查输出中是否有 "Sleeping" 字样，如果有，说明可能还在 sleep 等待中
+							// 如果 cmd.Wait() 返回了，说明进程已经结束
+							// 但如果输出最后是 "Sleeping"，说明进程可能在 sleep 期间被终止了
+							// 这种情况下，我们应该检查是否有 .part 文件，如果有，说明下载可能还没完成
+							outputLower := strings.ToLower(outputStr)
+							hasSleeping := strings.Contains(outputLower, "[download] sleeping") ||
+								strings.Contains(outputLower, "sleeping") ||
+								strings.Contains(outputLower, "sleep ")
+							
+							// 如果输出中有 "Sleeping" 且命令返回了错误或非零退出码，说明可能在 sleep 期间被终止
+							// 检查是否有 .part 文件，如果有，说明下载可能还没完成，应该等待更长时间
+							if hasSleeping {
+								// 检查是否有 .part 文件
+								partPattern := filepath.Join(videoDir, "*.part")
+								matches, _ := filepath.Glob(partPattern)
+								if len(matches) > 0 {
+									logger.Warn().
+										Int("strategy_index", i+1).
+										Str("output_snippet", previewForLog(outputStr, 200)).
+										Strs("part_files", matches).
+										Msg("检测到 yt-dlp 输出中有 'Sleeping' 且存在 .part 文件，可能下载未完成，将在后续检查中处理")
+									// 不立即返回错误，让后续的 findVideoFileWithRetry 处理
+								}
+							}
+							
 							// 记录命令完成信息
 							exitCode := 0
 							if waitErr != nil {
@@ -228,6 +254,7 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 								Int("strategy_index", i+1).
 								Int("exit_code", exitCode).
 								Int("output_length", len(outputStr)).
+								Bool("has_sleeping", hasSleeping).
 								Str("output_full", outputStr).
 								Err(err).
 								Msg("命令执行完成")
@@ -398,7 +425,27 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 		if err == nil && !hasErrorInOutput {
 			// 成功，返回结果
-			videoFile, err := d.fileRepo.FindVideoFile(videoDir)
+			// 注意：yt-dlp 可能返回成功，但文件还在下载或合并中（HLS 下载），需要等待
+			// 检查输出中是否有下载完成的迹象（100% 或 Download complete）
+			outputLower := strings.ToLower(outputStr)
+			hasDownloadComplete := strings.Contains(outputLower, "100%") ||
+				strings.Contains(outputLower, "download complete") ||
+				strings.Contains(outputLower, "already been downloaded")
+
+			// 如果输出中没有下载完成的迹象，但有 .part 文件，说明可能还在下载中
+			if !hasDownloadComplete {
+				partPattern := filepath.Join(videoDir, "*.part")
+				matches, _ := filepath.Glob(partPattern)
+				if len(matches) > 0 {
+					logger.Warn().
+						Str("video_dir", videoDir).
+						Str("video_id", videoID).
+						Strs("part_files", matches).
+						Msg("yt-dlp 返回成功，但输出中未检测到下载完成迹象，且存在 .part 文件，可能仍在下载中")
+				}
+			}
+
+			videoFile, err := d.findVideoFileWithRetry(videoDir, videoID)
 			if err != nil {
 				return nil, fmt.Errorf("查找视频文件失败: %w", err)
 			}
@@ -498,7 +545,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 		output, err := cmd.CombinedOutput()
 		if err == nil {
 			// 成功，返回结果
-			videoFile, errFind := d.fileRepo.FindVideoFile(videoDir)
+			// 注意：yt-dlp 可能返回成功，但文件还在合并中（HLS 下载），需要等待
+			videoFile, errFind := d.findVideoFileWithRetry(videoDir, videoID)
 			if errFind != nil {
 				return nil, fmt.Errorf("查找视频文件失败: %w", errFind)
 			}
@@ -518,7 +566,8 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 	// 所有尝试都失败了，但在返回错误前，检查视频文件是否已经成功下载
 	// 某些情况下（如缺少 ffprobe），yt-dlp 可能返回错误但实际已下载视频
-	videoFile, errFind := d.fileRepo.FindVideoFile(videoDir)
+	// 注意：即使命令失败，文件可能还在合并中，需要等待
+	videoFile, errFind := d.findVideoFileWithRetry(videoDir, videoID)
 	if errFind == nil && videoFile != "" {
 		// 视频文件存在，认为下载成功（即使 yt-dlp 返回了错误）
 		logger.Warn().
@@ -1258,4 +1307,103 @@ func (d *downloader) stripResolutionFromSubtitleFilenames(videoDir string, subti
 		}
 	}
 	return newPaths
+}
+
+// findVideoFileWithRetry 查找视频文件，如果找不到则检查是否有 .part 文件，如果有则等待后重试
+// 如果检测到文件大小还在变化，说明还在下载中，需要等待更长时间
+func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, error) {
+	const maxRetries = 6  // 增加重试次数，因为 HLS 下载可能需要更长时间合并
+	const retryDelay = 10 * time.Second  // 增加等待时间
+
+	var lastPartFileSize int64 = -1
+	var lastPartFileTime time.Time
+
+	for i := 0; i < maxRetries; i++ {
+		// 先尝试查找完整文件
+		videoFile, err := d.fileRepo.FindVideoFile(videoDir)
+		if err == nil && videoFile != "" {
+			return videoFile, nil
+		}
+
+		// 如果找不到完整文件，检查是否有 .part 文件
+		partPattern := filepath.Join(videoDir, videoID+"_*.part")
+		matches, _ := filepath.Glob(partPattern)
+		// 也检查通用的 .part 文件（不包含 videoID，因为文件名可能不同）
+		if len(matches) == 0 {
+			partPattern = filepath.Join(videoDir, "*.part")
+			matches, _ = filepath.Glob(partPattern)
+		}
+
+		if len(matches) == 0 {
+			// 没有 .part 文件，说明确实没有下载
+			if i == 0 {
+				// 第一次尝试，直接返回错误
+				return "", fmt.Errorf("未找到视频文件")
+			}
+			// 重试后仍然没有，返回错误
+			return "", fmt.Errorf("未找到视频文件（已重试 %d 次）", i+1)
+		}
+
+		// 有 .part 文件，检查文件大小是否还在变化
+		// 找到最大的 .part 文件（通常是主文件）
+		var largestPartFile string
+		var largestSize int64 = -1
+		for _, match := range matches {
+			if info, err := os.Stat(match); err == nil {
+				if info.Size() > largestSize {
+					largestSize = info.Size()
+					largestPartFile = match
+				}
+			}
+		}
+
+		if largestPartFile != "" {
+			// 检查文件大小是否还在变化
+			if lastPartFileSize >= 0 && largestSize == lastPartFileSize {
+				// 文件大小没有变化，可能已经停止下载或正在合并
+				noChangeDuration := time.Since(lastPartFileTime)
+				if noChangeDuration > 30*time.Second {
+					// 文件大小超过30秒没有变化，可能已经停止下载
+					logger.Warn().
+						Str("video_dir", videoDir).
+						Str("video_id", videoID).
+						Str("part_file", largestPartFile).
+						Int64("file_size", largestSize).
+						Dur("no_change_duration", noChangeDuration).
+						Msg("检测到 .part 文件大小长时间无变化，可能下载已停止")
+					// 继续等待，但记录警告
+				}
+			} else {
+				// 文件大小有变化，说明还在下载中
+				if lastPartFileSize >= 0 {
+					logger.Info().
+						Str("video_dir", videoDir).
+						Str("video_id", videoID).
+						Str("part_file", largestPartFile).
+						Int64("old_size", lastPartFileSize).
+						Int64("new_size", largestSize).
+						Msg("检测到 .part 文件大小仍在变化，下载进行中")
+				}
+				lastPartFileSize = largestSize
+				lastPartFileTime = time.Now()
+			}
+		}
+
+		// 有 .part 文件，说明还在下载或合并中，等待后重试
+		if i < maxRetries-1 {
+			logger.Info().
+				Str("video_dir", videoDir).
+				Str("video_id", videoID).
+				Int("retry", i+1).
+				Int("max_retries", maxRetries).
+				Dur("delay", retryDelay).
+				Strs("part_files", matches).
+				Int64("part_file_size", largestSize).
+				Msg("检测到 .part 文件，等待文件下载/合并完成")
+			time.Sleep(retryDelay)
+		}
+	}
+
+	// 所有重试都失败
+	return "", fmt.Errorf("未找到视频文件（已等待 %d 次，可能仍在下载/合并中）", maxRetries)
 }
