@@ -132,6 +132,15 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return fmt.Errorf("路径不存在: %s", videoPath)
 	}
 
+	// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
+	if strings.Contains(filepath.Base(videoFile), ".temp.") {
+		logger.Warn().
+			Str("video_file", videoFile).
+			Str("video_dir", videoDir).
+			Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
+		return nil
+	}
+
 	// 如果该视频已标记为上传完成，则跳过
 	if s.fileManager.IsVideoUploaded(videoDir) {
 		logger.Info().
@@ -388,6 +397,16 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
+		// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
+		if strings.Contains(filepath.Base(videoFile), ".temp.") {
+			logger.Warn().
+				Str("video_file", videoFile).
+				Str("video_id", videoID).
+				Str("title", title).
+				Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
+			continue
+		}
+
 		allSubtitlePaths, _ := s.fileManager.FindSubtitleFiles(videoDir)
 		// 优先选择英文字幕
 		subtitlePaths := s.filterEnglishSubtitles(allSubtitlePaths)
@@ -605,6 +624,15 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 		videoFile, err := s.fileManager.FindVideoFile(videoDir)
 		if err != nil || videoFile == "" {
 			logger.Warn().Str("video_id", videoID).Str("video_dir", videoDir).Msg("未找到本地视频文件，跳过")
+			continue
+		}
+
+		// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
+		if strings.Contains(filepath.Base(videoFile), ".temp.") {
+			logger.Warn().
+				Str("video_file", videoFile).
+				Str("video_id", videoID).
+				Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
 			continue
 		}
 

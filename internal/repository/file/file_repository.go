@@ -231,8 +231,14 @@ func (r *repository) FindVideoFile(dir string) (string, error) {
 		if err != nil {
 			continue
 		}
-		if len(matches) > 0 {
-			return matches[0], nil
+		// 过滤掉临时文件（.temp. 或 .part 等）
+		for _, match := range matches {
+			base := filepath.Base(match)
+			// 排除临时文件：包含 .temp. 或 .part 的文件
+			if strings.Contains(base, ".temp.") || strings.Contains(base, ".part") {
+				continue
+			}
+			return match, nil
 		}
 	}
 

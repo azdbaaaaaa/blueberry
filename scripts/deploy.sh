@@ -625,6 +625,7 @@ summary = {
     "total_downloaded_videos": 0,
     "total_uploaded_videos": 0,
     "total_uploaded_with_subtitles": 0,
+    "total_subtitles": 0,
     "servers": []
 }
 
@@ -644,6 +645,7 @@ for stats_file in glob.glob(os.path.join(download_stats_dir, "*.json")):
             summary["total_downloaded_videos"] += data.get("downloaded_videos", 0)
             summary["total_uploaded_videos"] += data.get("uploaded_videos", 0)
             summary["total_uploaded_with_subtitles"] += data.get("uploaded_with_subtitles", 0)
+            summary["total_subtitles"] += data.get("total_subtitles", 0)
             
             # 从文件名中提取 IP
             filename = os.path.basename(stats_file)
@@ -658,7 +660,8 @@ for stats_file in glob.glob(os.path.join(download_stats_dir, "*.json")):
                 "total_videos": data.get("total_videos", 0),
                 "downloaded_videos": data.get("downloaded_videos", 0),
                 "uploaded_videos": data.get("uploaded_videos", 0),
-                "uploaded_with_subtitles": data.get("uploaded_with_subtitles", 0)
+                "uploaded_with_subtitles": data.get("uploaded_with_subtitles", 0),
+                "total_subtitles": data.get("total_subtitles", 0)
             })
     except:
         pass
@@ -801,6 +804,7 @@ stats = {
     'downloaded_videos': 0,
     'uploaded_videos': 0,
     'uploaded_with_subtitles': 0,
+    'total_subtitles': 0,
     'channels': {}
 }
 
@@ -819,7 +823,8 @@ for channel_dir in glob.glob(os.path.join(downloads_dir, '*')):
         'total_videos': 0,
         'downloaded_videos': 0,
         'uploaded_videos': 0,
-        'uploaded_with_subtitles': 0
+        'uploaded_with_subtitles': 0,
+        'total_subtitles': 0
     }
     
     # 遍历频道下的所有视频目录
@@ -861,16 +866,20 @@ for channel_dir in glob.glob(os.path.join(downloads_dir, '*')):
             except:
                 pass
         
+        # 统计所有字幕文件（不限于上传完成的视频）
+        subtitle_files = []
+        # 查找 .srt 和 .vtt 文件
+        for ext in ['*.srt', '*.vtt']:
+            subtitle_files.extend(glob.glob(os.path.join(video_dir, ext)))
+        
+        # 统计总字幕数
+        stats['total_subtitles'] += len(subtitle_files)
+        channel_stats['total_subtitles'] += len(subtitle_files)
+        
         # 检查是否有字幕（上传完成的视频）
-        if is_uploaded:
-            subtitle_files = []
-            # 查找 .srt 和 .vtt 文件
-            for ext in ['*.srt', '*.vtt']:
-                subtitle_files.extend(glob.glob(os.path.join(video_dir, ext)))
-            
-            if len(subtitle_files) > 0:
-                stats['uploaded_with_subtitles'] += 1
-                channel_stats['uploaded_with_subtitles'] += 1
+        if is_uploaded and len(subtitle_files) > 0:
+            stats['uploaded_with_subtitles'] += 1
+            channel_stats['uploaded_with_subtitles'] += 1
     
     if channel_stats['total_videos'] > 0:
         stats['channels'][channel_id] = channel_stats
@@ -900,7 +909,9 @@ try:
     print(f\"{data.get('downloaded_videos', 0)}\")
     print(f\"{data.get('uploaded_videos', 0)}\")
     print(f\"{data.get('uploaded_with_subtitles', 0)}\")
+    print(f\"{data.get('total_subtitles', 0)}\")
 except:
+    print('0')
     print('0')
     print('0')
     print('0')
@@ -911,11 +922,13 @@ except:
         local downloaded=$(echo "$stats_summary" | sed -n '2p')
         local uploaded=$(echo "$stats_summary" | sed -n '3p')
         local uploaded_with_subs=$(echo "$stats_summary" | sed -n '4p')
+        local total_subtitles=$(echo "$stats_summary" | sed -n '5p')
         
         log_ip "$ip" "  总视频数: ${total_videos:-0}"
         log_ip "$ip" "  下载完成: ${downloaded:-0}"
         log_ip "$ip" "  上传完成: ${uploaded:-0}"
         log_ip "$ip" "  上传完成且有字幕: ${uploaded_with_subs:-0}"
+        log_ip "$ip" "  总字幕数: ${total_subtitles:-0}"
         
         return 0
     else
