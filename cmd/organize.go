@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"blueberry/internal/config"
 	"blueberry/internal/repository/file"
@@ -21,6 +22,39 @@ import (
 var (
 	organizeForce bool // 强制重新处理，无视 .organized 标记
 )
+
+// sanitizeFilename 清理文件名中的非法字符，确保文件名可以安全使用
+// 移除或替换可能导致文件系统错误的字符
+func sanitizeFilename(filename string) string {
+	// 先确保是有效的 UTF-8 字符串
+	if !utf8.ValidString(filename) {
+		// 如果不是有效的 UTF-8，尝试修复
+		filename = strings.ToValidUTF8(filename, "")
+	}
+
+	// 移除或替换非法字符
+	var result strings.Builder
+	for _, r := range filename {
+		// 允许的字符：字母、数字、常见标点符号、中文字符等
+		// 移除控制字符（0x00-0x1F，除了换行符等）和某些特殊字符
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			continue // 跳过控制字符
+		}
+		// 移除某些可能导致问题的字符
+		if r == 0x7F || r == 0xFFFE || r == 0xFFFF {
+			continue
+		}
+		// 替换某些可能导致问题的字符
+		if r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' {
+			result.WriteRune('_')
+			continue
+		}
+		// 保留其他字符
+		result.WriteRune(r)
+	}
+
+	return result.String()
+}
 
 var organizeCmd = &cobra.Command{
 	Use:   "organize",
@@ -87,13 +121,23 @@ var organizeCmd = &cobra.Command{
 
 		// 频道统计信息
 		type ChannelStats struct {
-			ChannelID        string `json:"channel_id"`
-			TotalVideos      int    `json:"total_videos"`
-			DownloadedVideos int    `json:"downloaded_videos"`
-			TotalSubtitles   int    `json:"total_subtitles"`
-			UploadedVideos   int    `json:"uploaded_videos"`
+			ChannelID              string `json:"channel_id"`
+			TotalVideos            int    `json:"total_videos"`
+			DownloadedVideos       int    `json:"downloaded_videos"`
+			TotalSubtitles         int    `json:"total_subtitles"`
+			UploadedVideos         int    `json:"uploaded_videos"`
+			UploadedWithSubtitles  int    `json:"uploaded_with_subtitles"`
 		}
 		channelStatsList := make([]ChannelStats, 0)
+
+		// 全局统计
+		var globalStats struct {
+			TotalVideos            int `json:"total_videos"`
+			TotalDownloadedVideos  int `json:"total_downloaded_videos"`
+			TotalUploadedVideos    int `json:"total_uploaded_videos"`
+			TotalUploadedWithSubtitles int `json:"total_uploaded_with_subtitles"`
+			TotalSubtitles         int `json:"total_subtitles"`
+		}
 
 		// 遍历所有频道目录
 		channelEntries, err := os.ReadDir(absDownloadsDir)
@@ -119,11 +163,12 @@ var organizeCmd = &cobra.Command{
 
 			// 初始化频道统计
 			channelStats := ChannelStats{
-				ChannelID:        channelID,
-				TotalVideos:      0,
-				DownloadedVideos: 0,
-				TotalSubtitles:   0,
-				UploadedVideos:   0,
+				ChannelID:             channelID,
+				TotalVideos:           0,
+				DownloadedVideos:      0,
+				TotalSubtitles:        0,
+				UploadedVideos:        0,
+				UploadedWithSubtitles: 0,
 			}
 
 			// 遍历频道下的所有视频目录
@@ -150,14 +195,28 @@ var organizeCmd = &cobra.Command{
 				}
 
 				// 检查上传状态
-				if fileRepo.IsVideoUploaded(videoDir) {
+				isUploaded := fileRepo.IsVideoUploaded(videoDir)
+				if isUploaded {
 					channelStats.UploadedVideos++
+					globalStats.TotalUploadedVideos++
 				}
 
 				// 统计字幕数量
 				subtitleFilesForStats, err := fileRepo.FindSubtitleFiles(videoDir)
 				if err == nil {
 					channelStats.TotalSubtitles += len(subtitleFilesForStats)
+					globalStats.TotalSubtitles += len(subtitleFilesForStats)
+					// 如果已上传且有字幕，统计 uploaded_with_subtitles
+					if isUploaded && len(subtitleFilesForStats) > 0 {
+						channelStats.UploadedWithSubtitles++
+						globalStats.TotalUploadedWithSubtitles++
+					}
+				}
+
+				// 更新全局统计
+				globalStats.TotalVideos++
+				if fileRepo.IsVideoDownloaded(videoDir) {
+					globalStats.TotalDownloadedVideos++
 				}
 
 				// 检查是否已经 organize 过（除非使用 --force）
@@ -297,6 +356,8 @@ var organizeCmd = &cobra.Command{
 					if needCreateNewFormat {
 						truncatedTitle := fileRepo.TruncateTitleForFilename(sanitizedTitle, videoID, lang, subtitleExt)
 						newFormatSubtitle := fmt.Sprintf("%s[%s].%s.%s", truncatedTitle, videoID, lang, subtitleExt)
+						// 清理文件名中的非法字符
+						newFormatSubtitle = sanitizeFilename(newFormatSubtitle)
 						newFormatPath := filepath.Join(videoDir, newFormatSubtitle)
 
 						if _, err := os.Stat(newFormatPath); os.IsNotExist(err) {
@@ -326,6 +387,8 @@ var organizeCmd = &cobra.Command{
 					if subtitleFile != "" {
 						truncatedTitle := fileRepo.TruncateTitleForFilename(sanitizedTitle, videoID, lang, subtitleExt)
 						destSubtitle := fmt.Sprintf("%s[%s].%s.%s", truncatedTitle, videoID, lang, subtitleExt)
+						// 清理文件名中的非法字符
+						destSubtitle = sanitizeFilename(destSubtitle)
 						destPath := filepath.Join(aidSubtitlesDir, destSubtitle)
 
 						// 读取源文件
@@ -362,6 +425,7 @@ var organizeCmd = &cobra.Command{
 				Int("downloaded_videos", channelStats.DownloadedVideos).
 				Int("total_subtitles", channelStats.TotalSubtitles).
 				Int("uploaded_videos", channelStats.UploadedVideos).
+				Int("uploaded_with_subtitles", channelStats.UploadedWithSubtitles).
 				Msg("频道统计")
 		}
 
@@ -381,6 +445,26 @@ var organizeCmd = &cobra.Command{
 			} else {
 				logger.Warn().Err(err).Msg("序列化频道统计信息失败")
 			}
+		}
+
+		// 生成全局统计 JSON 文件（类似 sync 脚本中的格式）
+		globalStatsData, err := json.MarshalIndent(globalStats, "", "  ")
+		if err == nil {
+			globalStatsFile := filepath.Join(archiveDir, "download_stats.json")
+			if err := os.WriteFile(globalStatsFile, globalStatsData, 0644); err == nil {
+				logger.Info().
+					Str("stats_file", globalStatsFile).
+					Int("total_videos", globalStats.TotalVideos).
+					Int("total_downloaded_videos", globalStats.TotalDownloadedVideos).
+					Int("total_uploaded_videos", globalStats.TotalUploadedVideos).
+					Int("total_uploaded_with_subtitles", globalStats.TotalUploadedWithSubtitles).
+					Int("total_subtitles", globalStats.TotalSubtitles).
+					Msg("已保存全局下载统计信息")
+			} else {
+				logger.Warn().Err(err).Str("stats_file", globalStatsFile).Msg("保存全局下载统计信息失败")
+			}
+		} else {
+			logger.Warn().Err(err).Msg("序列化全局下载统计信息失败")
 		}
 
 		logger.Info().

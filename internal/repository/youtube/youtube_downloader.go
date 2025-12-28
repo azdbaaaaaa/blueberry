@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"blueberry/internal/config"
 	"blueberry/internal/repository/file"
@@ -1023,6 +1024,39 @@ func (d *downloader) convertSRTToFrameFormatIfNeeded(videoDir string, subtitlePa
 	return convertedPaths
 }
 
+// sanitizeSubtitleFilename 清理字幕文件名中的非法字符，确保文件名可以安全使用
+// 移除或替换可能导致文件系统错误的字符
+func sanitizeSubtitleFilename(filename string) string {
+	// 先确保是有效的 UTF-8 字符串
+	if !utf8.ValidString(filename) {
+		// 如果不是有效的 UTF-8，尝试修复
+		filename = strings.ToValidUTF8(filename, "")
+	}
+
+	// 移除或替换非法字符
+	var result strings.Builder
+	for _, r := range filename {
+		// 允许的字符：字母、数字、常见标点符号、中文字符等
+		// 移除控制字符（0x00-0x1F，除了换行符等）和某些特殊字符
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			continue // 跳过控制字符
+		}
+		// 移除某些可能导致问题的字符
+		if r == 0x7F || r == 0xFFFE || r == 0xFFFF {
+			continue
+		}
+		// 替换某些可能导致问题的字符
+		if r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' {
+			result.WriteRune('_')
+			continue
+		}
+		// 保留其他字符
+		result.WriteRune(r)
+	}
+
+	return result.String()
+}
+
 // renameSubtitlesToTitleFormat 将字幕文件重命名为 {title}[{video_id}].{lang}.{ext} 格式
 // 输入格式可能是：{video_id}.{lang}.{ext} 或 {video_id}.{lang}.frame.srt
 func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title string, subtitlePaths []string) []string {
@@ -1036,7 +1070,19 @@ func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title strin
 	}
 
 	for _, subtitlePath := range subtitlePaths {
+		// 保存原始路径，用于日志记录
+		originalPath := subtitlePath
 		base := filepath.Base(subtitlePath)
+
+		// 检查是否已经是新格式（包含 [video_id] 的模式）
+		// 如果已经是新格式，跳过重命名
+		if strings.Contains(base, fmt.Sprintf("[%s]", videoID)) {
+			logger.Debug().
+				Str("subtitle_path", subtitlePath).
+				Msg("字幕文件已经是新格式，跳过重命名")
+			renamedPaths = append(renamedPaths, subtitlePath)
+			continue
+		}
 
 		// 处理可能的 .frame.srt 后缀
 		var ext string
@@ -1114,6 +1160,8 @@ func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title strin
 		}
 
 		newName := fmt.Sprintf("%s%s", finalTitle, fixedPart)
+		// 清理文件名中的非法字符
+		newName = sanitizeSubtitleFilename(newName)
 		newPath := filepath.Join(videoDir, newName)
 
 		// 如果新文件已存在，先删除
@@ -1126,14 +1174,14 @@ func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title strin
 		// 重命名文件
 		if err := os.Rename(subtitlePath, newPath); err != nil {
 			logger.Warn().
-				Str("old_path", subtitlePath).
+				Str("old_path", originalPath).
 				Str("new_path", newPath).
 				Err(err).
 				Msg("重命名字幕文件失败，保持原文件名")
 			renamedPaths = append(renamedPaths, subtitlePath)
 		} else {
 			logger.Info().
-				Str("old_path", subtitlePath).
+				Str("old_path", originalPath).
 				Str("new_path", newPath).
 				Str("lang", lang).
 				Msg("字幕文件已重命名为 {title}[{video_id}].{lang}.{ext} 格式")
