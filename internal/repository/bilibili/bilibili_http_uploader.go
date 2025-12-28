@@ -126,8 +126,15 @@ func (u *httpUploader) UploadVideo(ctx context.Context, videoPath, videoTitle, v
 				logger.Debug().Str("path", thumb).Msg("使用 thumbnail.jpg 作为封面图（回退）")
 			}
 		}
+		// 4) 如果还是找不到，使用默认封面图（assets/default_cover.jpg）
 		if coverPath == "" {
-			return nil, fmt.Errorf("未找到封面图文件（需要与视频同名的 .jpg，或 cover.{jpg|jpeg|png|webp|gif}，或 thumbnail.jpg）")
+			defaultCoverPath := u.findDefaultCoverPath(dir)
+			if defaultCoverPath != "" {
+				coverPath = defaultCoverPath
+				logger.Info().Str("path", coverPath).Msg("使用默认封面图（assets/default_cover.jpg）")
+			} else {
+				return nil, fmt.Errorf("未找到封面图文件（需要与视频同名的 .jpg，或 cover.{jpg|jpeg|png|webp|gif}，或 thumbnail.jpg，或 assets/default_cover.jpg）")
+			}
 		}
 		coverURL, err = u.uploadCover(ctx, coverPath, actualVideoPath)
 		if err != nil {
@@ -1315,6 +1322,33 @@ func generateHash(input string) string {
 		hash = -hash
 	}
 	return fmt.Sprintf("%x", hash)[:16] // 取前16位
+}
+
+// findDefaultCoverPath 查找默认封面图路径（assets/default_cover.jpg）
+// 尝试多个可能的位置：相对于视频目录、相对于工作目录等
+func (u *httpUploader) findDefaultCoverPath(videoDir string) string {
+	// 尝试多个可能的 assets 目录位置
+	possiblePaths := []string{
+		"./assets/default_cover.jpg",                    // 当前工作目录
+		"assets/default_cover.jpg",                      // 相对路径
+		filepath.Join(videoDir, "..", "..", "assets", "default_cover.jpg"), // 从视频目录向上查找
+		filepath.Join("/opt/blueberry/assets/default_cover.jpg"),            // 默认安装路径
+		filepath.Join("/usr/local/blueberry/assets/default_cover.jpg"),       // 备用安装路径
+	}
+
+	for _, path := range possiblePaths {
+		if absPath, err := filepath.Abs(path); err == nil {
+			if _, err := os.Stat(absPath); err == nil {
+				return absPath
+			}
+		}
+		// 也尝试直接使用路径（可能是绝对路径）
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	return ""
 }
 
 // uploadCover 上传封面图

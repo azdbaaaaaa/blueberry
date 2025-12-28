@@ -295,7 +295,8 @@ var organizeCmd = &cobra.Command{
 
 					// 如果需要创建新格式，先创建副本
 					if needCreateNewFormat {
-						newFormatSubtitle := fmt.Sprintf("%s[%s].%s.%s", sanitizedTitle, videoID, lang, subtitleExt)
+						truncatedTitle := fileRepo.TruncateTitleForFilename(sanitizedTitle, videoID, lang, subtitleExt)
+						newFormatSubtitle := fmt.Sprintf("%s[%s].%s.%s", truncatedTitle, videoID, lang, subtitleExt)
 						newFormatPath := filepath.Join(videoDir, newFormatSubtitle)
 
 						if _, err := os.Stat(newFormatPath); os.IsNotExist(err) {
@@ -323,7 +324,8 @@ var organizeCmd = &cobra.Command{
 
 					// 复制到 subtitles/{aid}/ 目录（使用新格式命名）
 					if subtitleFile != "" {
-						destSubtitle := fmt.Sprintf("%s[%s].%s.%s", sanitizedTitle, videoID, lang, subtitleExt)
+						truncatedTitle := fileRepo.TruncateTitleForFilename(sanitizedTitle, videoID, lang, subtitleExt)
+						destSubtitle := fmt.Sprintf("%s[%s].%s.%s", truncatedTitle, videoID, lang, subtitleExt)
 						destPath := filepath.Join(aidSubtitlesDir, destSubtitle)
 
 						// 读取源文件

@@ -350,7 +350,9 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 		if allCompleted {
 			allFilesExist := true
 			for _, lang := range languages {
-				expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", sanitizeTitle(videoInfo.Title), videoID, lang)
+				sanitizedTitle := sanitizeTitle(videoInfo.Title)
+				truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
+				expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", truncatedTitle, videoID, lang)
 				expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
 				if _, err := os.Stat(expectedNewFormatPath); err != nil {
 					// 如果某个语言标记为 not_found，文件不存在是正常的
@@ -414,7 +416,9 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 			}
 
 			// 检查是否已有新格式的字幕文件：title[video_id].lang.srt
-			expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", sanitizeTitle(videoInfo.Title), videoID, lang)
+			sanitizedTitle := sanitizeTitle(videoInfo.Title)
+			truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
+			expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", truncatedTitle, videoID, lang)
 			expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
 			if _, err := os.Stat(expectedNewFormatPath); err == nil {
 				// 新格式文件已存在
@@ -432,8 +436,8 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 			var oldFormatPath string
 			for _, subPath := range subtitleFiles {
 				base := filepath.Base(subPath)
-				// 跳过已经是新格式的文件
-				if strings.HasPrefix(base, sanitizeTitle(videoInfo.Title)+"["+videoID+"]") {
+				// 跳过已经是新格式的文件（检查原始标题和截断后的标题）
+				if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
 					continue
 				}
 				// 检查文件名中是否包含该语言代码
@@ -695,7 +699,9 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 		}
 
 		// 检查是否已有新格式的字幕文件：title[video_id].lang.srt
-		expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", sanitizeTitle(videoInfo.Title), videoID, lang)
+		sanitizedTitle := sanitizeTitle(videoInfo.Title)
+		truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
+		expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", truncatedTitle, videoID, lang)
 		expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
 		if _, err := os.Stat(expectedNewFormatPath); err == nil {
 			// 新格式文件已存在
@@ -713,8 +719,8 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 		var oldFormatPath string
 		for _, subPath := range subtitleFiles {
 			base := filepath.Base(subPath)
-			// 跳过已经是新格式的文件
-			if strings.HasPrefix(base, sanitizeTitle(videoInfo.Title)+"["+videoID+"]") {
+			// 跳过已经是新格式的文件（检查原始标题和截断后的标题）
+			if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
 				continue
 			}
 			// 检查文件名中是否包含该语言代码
@@ -925,8 +931,14 @@ func (s *downloadService) downloadSubtitlesOnly(ctx context.Context, videoDir, v
 		var foundPath string
 		for _, subPath := range subtitleFiles {
 			base := filepath.Base(subPath)
-			// 跳过已经是新格式的文件
-			if strings.HasPrefix(base, sanitizeTitle(title)+"["+videoID+"]") {
+			// 跳过已经是新格式的文件（检查是否以 title[videoID] 开头）
+			sanitizedTitle := sanitizeTitle(title)
+			if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") {
+				continue
+			}
+			// 也检查截断后的标题（可能之前已经截断过）
+			truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
+			if strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
 				continue
 			}
 			// 检查文件名中是否包含语言代码
@@ -969,6 +981,28 @@ func (s *downloadService) downloadSubtitlesOnly(ctx context.Context, videoDir, v
 	}
 
 	return results, nil
+}
+
+// truncateTitleForFilename 截断标题以适应文件名长度限制
+// 格式：{title}[{video_id}].{lang}.{ext}
+// 保留 video_id 和 lang.ext 部分，只截断 title
+func truncateTitleForFilename(title, videoID, lang, ext string) string {
+	maxFilenameLength := 255 // Linux 文件名最大长度
+	fixedPart := fmt.Sprintf("[%s].%s%s", videoID, lang, ext)
+	maxTitleLength := maxFilenameLength - len(fixedPart)
+
+	titleBytes := []byte(title)
+	if len(titleBytes) <= maxTitleLength {
+		return title
+	}
+
+	// 截断标题，确保不超过最大长度（按字节计算）
+	truncated := titleBytes[:maxTitleLength]
+	// 如果最后一个字节是 UTF-8 字符的中间字节，继续往前截断
+	for len(truncated) > 0 && (truncated[len(truncated)-1]&0xC0) == 0x80 {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return string(truncated)
 }
 
 // sanitizeTitle 清理标题，用于文件名

@@ -22,6 +22,7 @@ import (
 )
 
 var ErrBotDetection = errors.New("bot detection")
+var ErrFileStuck = errors.New("file download stuck (no size change)")
 
 type Downloader interface {
 	DownloadVideo(ctx context.Context, channelID, videoURL string, languages []string, title string) (*DownloadResult, error)
@@ -49,16 +50,70 @@ func NewDownloader(fileRepo file.Repository, cookiesFromBrowser, cookiesFile str
 }
 
 func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL string, languages []string, title string) (*DownloadResult, error) {
-	result := &DownloadResult{
-		SubtitlePaths: make([]string, 0),
-	}
-
 	videoID := d.fileRepo.ExtractVideoID(videoURL)
 
 	// 使用视频ID创建目录（不再使用标题）
 	videoDir, err := d.fileRepo.EnsureVideoDir(channelID, videoID)
 	if err != nil {
 		return nil, err
+	}
+
+	// 重试下载（最多5次），用于处理文件卡住的情况
+	const maxDownloadRetries = 5
+	for retryCount := 0; retryCount < maxDownloadRetries; retryCount++ {
+		if retryCount > 0 {
+			logger.Info().
+				Str("video_id", videoID).
+				Int("retry_count", retryCount).
+				Int("max_retries", maxDownloadRetries).
+				Msg("重新开始下载视频（文件卡住后重试）")
+		}
+
+		result, err := d.downloadVideoOnce(ctx, channelID, videoURL, languages, title, videoID, videoDir)
+		if err != nil {
+			// 检查是否是文件卡住的错误
+			if errors.Is(err, ErrFileStuck) {
+				// 如果还有重试次数，继续重试
+				if retryCount < maxDownloadRetries-1 {
+					// 根据配置决定是否清理部分下载的文件
+					cfg := config.Get()
+					if cfg != nil && cfg.YouTube.CleanupPartialFilesOnFailure {
+						if cleanupErr := d.fileRepo.CleanupPartialFiles(videoDir); cleanupErr != nil {
+							logger.Warn().Err(cleanupErr).Str("video_dir", videoDir).Msg("清理部分下载文件失败")
+						} else {
+							logger.Info().Str("video_dir", videoDir).Msg("已清理部分下载的文件，准备重新下载")
+						}
+					} else {
+						logger.Debug().Str("video_dir", videoDir).Msg("检测到文件卡住，但配置为不清理部分下载文件（cleanup_partial_files_on_failure=false），直接重新下载")
+					}
+
+					logger.Warn().
+						Str("video_id", videoID).
+						Int("retry_count", retryCount+1).
+						Int("max_retries", maxDownloadRetries).
+						Err(err).
+						Msg("检测到文件卡住，重新开始下载")
+					continue
+				} else {
+					// 重试次数用尽
+					return nil, fmt.Errorf("下载失败（文件卡住，已重试 %d 次）: %w", maxDownloadRetries, err)
+				}
+			}
+			// 其他错误直接返回
+			return nil, err
+		}
+		// 成功，返回结果
+		return result, nil
+	}
+
+	// 理论上不会到达这里
+	return nil, fmt.Errorf("下载失败（未知错误）")
+}
+
+// downloadVideoOnce 执行一次下载尝试（内部方法）
+func (d *downloader) downloadVideoOnce(ctx context.Context, channelID, videoURL string, languages []string, title string, videoID, videoDir string) (*DownloadResult, error) {
+	result := &DownloadResult{
+		SubtitlePaths: make([]string, 0),
 	}
 
 	// 下载策略顺序：
@@ -447,6 +502,10 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 
 			videoFile, err := d.findVideoFileWithRetry(videoDir, videoID)
 			if err != nil {
+				// 如果是文件卡住的错误，直接返回（不要包装），以便外层能正确检测
+				if errors.Is(err, ErrFileStuck) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("查找视频文件失败: %w", err)
 			}
 			result.VideoPath = videoFile
@@ -548,6 +607,10 @@ func (d *downloader) DownloadVideo(ctx context.Context, channelID, videoURL stri
 			// 注意：yt-dlp 可能返回成功，但文件还在合并中（HLS 下载），需要等待
 			videoFile, errFind := d.findVideoFileWithRetry(videoDir, videoID)
 			if errFind != nil {
+				// 如果是文件卡住的错误，直接返回（不要包装），以便外层能正确检测
+				if errors.Is(errFind, ErrFileStuck) {
+					return nil, errFind
+				}
 				return nil, fmt.Errorf("查找视频文件失败: %w", errFind)
 			}
 			result.VideoPath = videoFile
@@ -995,7 +1058,35 @@ func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title strin
 		if ext == ".frame.srt" {
 			finalExt = ".srt"
 		}
-		newName := fmt.Sprintf("%s[%s].%s%s", sanitizedTitle, videoID, lang, finalExt)
+
+		// 计算固定部分长度：[{video_id}].{lang}.{ext}
+		fixedPart := fmt.Sprintf("[%s].%s%s", videoID, lang, finalExt)
+		maxFilenameLength := 255 // Linux 文件名最大长度
+		maxTitleLength := maxFilenameLength - len(fixedPart)
+
+		// 如果标题太长，截断它（保留 video_id 部分）
+		finalTitle := sanitizedTitle
+		if len([]byte(finalTitle)) > maxTitleLength {
+			// 截断标题，确保不超过最大长度（按字节计算）
+			titleBytes := []byte(finalTitle)
+			if len(titleBytes) > maxTitleLength {
+				// 确保截断后不会破坏多字节字符（简单处理：从后往前找到完整的字符）
+				truncated := titleBytes[:maxTitleLength]
+				// 如果最后一个字节是 UTF-8 字符的中间字节，继续往前截断
+				for len(truncated) > 0 && (truncated[len(truncated)-1]&0xC0) == 0x80 {
+					truncated = truncated[:len(truncated)-1]
+				}
+				finalTitle = string(truncated)
+				logger.Debug().
+					Str("original_title", sanitizedTitle).
+					Str("truncated_title", finalTitle).
+					Int("max_title_length", maxTitleLength).
+					Int("fixed_part_length", len(fixedPart)).
+					Msg("标题过长，已截断")
+			}
+		}
+
+		newName := fmt.Sprintf("%s%s", finalTitle, fixedPart)
 		newPath := filepath.Join(videoDir, newName)
 
 		// 如果新文件已存在，先删除
@@ -1312,13 +1403,17 @@ func (d *downloader) stripResolutionFromSubtitleFilenames(videoDir string, subti
 // findVideoFileWithRetry 查找视频文件，如果找不到则检查是否有 .part 文件，如果有则等待后重试
 // 如果检测到文件大小还在变化，说明还在下载中，需要等待更长时间
 // 对于大文件，合并时间可能较长，因此增加重试次数和等待时间
+// 如果文件大小长时间无变化（超过30秒），且已重试6次，返回 ErrFileStuck 以便重新下载
 func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, error) {
-	const maxRetries = 12                   // 增加重试次数，大文件合并可能需要更长时间
-	const baseRetryDelay = 15 * time.Second // 基础等待时间
-	const maxRetryDelay = 60 * time.Second  // 最大等待时间（随重试次数递增）
+	const maxRetries = 12                    // 最大重试次数，大文件合并可能需要更长时间
+	const stuckCheckRetries = 6              // 如果文件大小无变化，检查6次后认为卡住
+	const baseRetryDelay = 15 * time.Second  // 基础等待时间
+	const maxRetryDelay = 60 * time.Second   // 最大等待时间（随重试次数递增）
+	const noChangeTimeout = 30 * time.Second // 文件大小无变化的超时时间
 
 	var lastPartFileSize int64 = -1
 	var lastPartFileTime time.Time
+	var noChangeStartTime time.Time
 
 	for i := 0; i < maxRetries; i++ {
 		// 先尝试查找完整文件
@@ -1364,19 +1459,36 @@ func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, e
 			if lastPartFileSize >= 0 && largestSize == lastPartFileSize {
 				// 文件大小没有变化，可能已经停止下载或正在合并
 				noChangeDuration := time.Since(lastPartFileTime)
-				if noChangeDuration > 30*time.Second {
-					// 文件大小超过30秒没有变化，可能已经停止下载
-					logger.Warn().
-						Str("video_dir", videoDir).
-						Str("video_id", videoID).
-						Str("part_file", largestPartFile).
-						Int64("file_size", largestSize).
-						Dur("no_change_duration", noChangeDuration).
-						Msg("检测到 .part 文件大小长时间无变化，可能下载已停止")
-					// 继续等待，但记录警告
+				if noChangeDuration > noChangeTimeout {
+					// 文件大小超过30秒没有变化，记录开始时间
+					if noChangeStartTime.IsZero() {
+						noChangeStartTime = time.Now()
+						logger.Warn().
+							Str("video_dir", videoDir).
+							Str("video_id", videoID).
+							Str("part_file", largestPartFile).
+							Int64("file_size", largestSize).
+							Dur("no_change_duration", noChangeDuration).
+							Msg("检测到 .part 文件大小长时间无变化，开始计时")
+					}
+
+					// 如果已经重试了6次且文件大小仍然无变化，认为下载卡住
+					if i >= stuckCheckRetries-1 {
+						noChangeTotalDuration := time.Since(noChangeStartTime)
+						logger.Error().
+							Str("video_dir", videoDir).
+							Str("video_id", videoID).
+							Str("part_file", largestPartFile).
+							Int64("file_size", largestSize).
+							Int("retry_count", i+1).
+							Dur("no_change_duration", noChangeDuration).
+							Dur("no_change_total_duration", noChangeTotalDuration).
+							Msg("检测到 .part 文件大小长时间无变化且已重试6次，认为下载卡住")
+						return "", fmt.Errorf("%w: 文件大小超过 %v 无变化，已重试 %d 次", ErrFileStuck, noChangeTotalDuration, i+1)
+					}
 				}
 			} else {
-				// 文件大小有变化，说明还在下载中
+				// 文件大小有变化，说明还在下载中，重置无变化计时
 				if lastPartFileSize >= 0 {
 					logger.Info().
 						Str("video_dir", videoDir).
@@ -1388,6 +1500,7 @@ func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, e
 				}
 				lastPartFileSize = largestSize
 				lastPartFileTime = time.Now()
+				noChangeStartTime = time.Time{} // 重置无变化计时
 			}
 		}
 

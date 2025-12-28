@@ -387,6 +387,16 @@ install_service_for_ip() {
     remote_copy "$SCRIPT_DIR/" "$REMOTE_HOST:$REMOTE_DIR/scripts/" || return 1
     remote_exec "chmod +x $REMOTE_DIR/scripts/*.sh 2>/dev/null || true" || return 1
     
+    # 复制 assets 文件夹（包含默认封面图）
+    ASSETS_DIR="$PROJECT_DIR/assets"
+    if [ -d "$ASSETS_DIR" ]; then
+        log_ip "$ip" "复制 assets 文件夹: $ASSETS_DIR -> $REMOTE_DIR/assets/"
+        remote_exec "mkdir -p $REMOTE_DIR/assets" || return 1
+        remote_copy "$ASSETS_DIR/" "$REMOTE_HOST:$REMOTE_DIR/assets/" || return 1
+    else
+        log_warn "[$ip] Assets 文件夹不存在: $ASSETS_DIR，跳过..."
+    fi
+    
     # 步骤 4: 复制 systemd 服务
     log_ip "$ip" "步骤 4/5: 复制 systemd 服务..."
     remote_copy "$SCRIPT_DIR/blueberry-download.service" "$REMOTE_HOST:/etc/systemd/system/" || return 1

@@ -77,6 +77,7 @@ type Repository interface {
 	SaveChannelInfo(channelID string, videos []map[string]interface{}) error
 	LoadChannelInfo(channelID string) ([]map[string]interface{}, error)
 	SanitizeTitle(title string) string
+	TruncateTitleForFilename(title, videoID, lang, ext string) string
 	EnsureVideoDirByTitle(channelID, title string) (string, error)
 	SavePendingDownloads(channelID string, pending *PendingDownloads) error
 	LoadPendingDownloads(channelID string) (*PendingDownloads, error)
@@ -507,6 +508,28 @@ func (r *repository) FindVideoDirByID(channelID, videoID string) (string, error)
 	return videoDir, nil
 }
 
+// TruncateTitleForFilename 截断标题以适应文件名长度限制
+// 格式：{title}[{video_id}].{lang}.{ext}
+// 保留 video_id 和 lang.ext 部分，只截断 title
+func (r *repository) TruncateTitleForFilename(title, videoID, lang, ext string) string {
+	maxFilenameLength := 255 // Linux 文件名最大长度
+	fixedPart := fmt.Sprintf("[%s].%s%s", videoID, lang, ext)
+	maxTitleLength := maxFilenameLength - len(fixedPart)
+	
+	titleBytes := []byte(title)
+	if len(titleBytes) <= maxTitleLength {
+		return title
+	}
+	
+	// 截断标题，确保不超过最大长度（按字节计算）
+	truncated := titleBytes[:maxTitleLength]
+	// 如果最后一个字节是 UTF-8 字符的中间字节，继续往前截断
+	for len(truncated) > 0 && (truncated[len(truncated)-1]&0xC0) == 0x80 {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return string(truncated)
+}
+
 // SanitizeTitle 清理标题，使其可以作为目录名
 // 移除或替换不允许在文件名中使用的字符
 func (r *repository) SanitizeTitle(title string) string {
@@ -592,16 +615,50 @@ func (r *repository) IsVideoDownloaded(videoDir string) bool {
 	}
 
 	// 检查视频下载状态
+	var downloaded bool
 	if video, ok := status["video"].(map[string]interface{}); ok {
-		if downloaded, ok := video["downloaded"].(bool); ok {
-			return downloaded
+		if d, ok := video["downloaded"].(bool); ok {
+			downloaded = d
+		}
+	} else if video, ok := status["video"].(bool); ok {
+		// 兼容旧格式（直接是 bool）
+		downloaded = video
+	} else {
+		return false
+	}
+
+	// 如果状态文件标记为已下载，还需要验证实际文件是否存在且完整
+	if downloaded {
+		// 检查是否有临时文件（.temp. 或 .part），如果有，说明可能还在下载中
+		entries, err := os.ReadDir(videoDir)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				fileName := entry.Name()
+				// 如果存在临时文件或部分文件，认为下载未完成
+				if strings.Contains(fileName, ".temp.") || strings.Contains(fileName, ".part") {
+					log.Debug().
+						Str("video_dir", videoDir).
+						Str("temp_file", fileName).
+						Msg("检测到临时文件或部分文件，认为视频下载未完成")
+					return false
+				}
+			}
+		}
+
+		// 验证实际视频文件是否存在
+		if _, err := r.FindVideoFile(videoDir); err != nil {
+			log.Debug().
+				Str("video_dir", videoDir).
+				Err(err).
+				Msg("状态标记为已下载，但未找到实际视频文件，认为下载未完成")
+			return false
 		}
 	}
-	// 兼容旧格式（直接是 bool）
-	if video, ok := status["video"].(bool); ok {
-		return video
-	}
-	return false
+
+	return downloaded
 }
 
 // IsSubtitlesDownloaded 检查字幕是否已下载完成

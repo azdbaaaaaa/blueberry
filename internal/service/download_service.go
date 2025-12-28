@@ -1351,12 +1351,32 @@ SUBTITLES_DONE:
 
 	// 如果没有封面图（缩略图下载失败或不存在），且视频已下载，则从视频首帧生成封面图
 	if !hasCover && videoPath != "" {
+		// 如果 coverPath 未设置，使用默认路径
+		if coverPath == "" {
+			coverPath = filepath.Join(videoDir, "cover.jpg")
+		}
 		if _, err := os.Stat(coverPath); os.IsNotExist(err) {
-			logger.Info().Str("video_id", videoID).Msg("缩略图不存在，开始从视频首帧生成封面图")
+			logger.Info().Str("video_id", videoID).Str("video_path", videoPath).Msg("缩略图不存在，开始从视频首帧生成封面图")
 			if err := s.generateCoverFromVideo(ctx, videoDir, videoPath); err != nil {
-				logger.Warn().Err(err).Msg("生成封面图失败，继续处理其他任务")
+				logger.Warn().Err(err).Str("video_path", videoPath).Msg("生成封面图失败，尝试使用默认封面图")
+				// 生成失败，尝试使用默认封面图
+				if err := s.useDefaultCover(videoDir, coverPath); err != nil {
+					logger.Warn().Err(err).Str("video_path", videoPath).Msg("使用默认封面图失败，继续处理其他任务")
+				} else {
+					logger.Info().Str("cover_path", coverPath).Msg("已使用默认封面图")
+				}
 			} else {
-				logger.Info().Str("cover_path", coverPath).Msg("封面图已从视频首帧生成")
+				// 验证封面图是否成功创建
+				if _, err := os.Stat(coverPath); err == nil {
+					logger.Info().Str("cover_path", coverPath).Msg("封面图已从视频首帧生成")
+				} else {
+					logger.Warn().Str("cover_path", coverPath).Msg("封面图生成后文件不存在，尝试使用默认封面图")
+					if err := s.useDefaultCover(videoDir, coverPath); err != nil {
+						logger.Warn().Err(err).Msg("使用默认封面图失败")
+					} else {
+						logger.Info().Str("cover_path", coverPath).Msg("已使用默认封面图")
+					}
+				}
 			}
 		} else {
 			logger.Info().Str("cover_path", coverPath).Msg("封面图已存在，跳过生成")
@@ -1509,12 +1529,19 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 	if videoPath, err := s.fileManager.FindVideoFile(videoDir); err == nil && videoPath != "" {
 		base := strings.TrimSuffix(videoPath, filepath.Ext(videoPath))
 		jpgPath := base + ".jpg"
-		if _, err := os.Stat(jpgPath); err == nil {
-			logger.Info().Str("thumbnail_path", jpgPath).Msg("检测到 yt-dlp 已下载的 JPG 缩略图，直接使用")
-			if err := s.fileManager.MarkThumbnailDownloadedWithPath(videoDir, jpgPath, ""); err != nil {
-				logger.Warn().Err(err).Msg("标记缩略图下载状态失败")
+		if info, err := os.Stat(jpgPath); err == nil {
+			// 检查文件大小，确保不为空
+			if info.Size() > 0 {
+				logger.Info().Str("thumbnail_path", jpgPath).Int64("size", info.Size()).Msg("检测到 yt-dlp 已下载的 JPG 缩略图，直接使用")
+				if err := s.fileManager.MarkThumbnailDownloadedWithPath(videoDir, jpgPath, ""); err != nil {
+					logger.Warn().Err(err).Msg("标记缩略图下载状态失败")
+				}
+				return jpgPath, nil
+			} else {
+				logger.Warn().Str("thumbnail_path", jpgPath).Msg("检测到 yt-dlp 缩略图文件存在但大小为0，将重新下载")
+				// 删除空文件，继续后续下载流程
+				_ = os.Remove(jpgPath)
 			}
-			return jpgPath, nil
 		}
 	}
 
@@ -1611,8 +1638,18 @@ func (s *downloadService) downloadThumbnails(ctx context.Context, videoDir strin
 		// wget 默认对 404 返回非0
 		cmd = exec.CommandContext(ctx, "wget", "--header=Accept: "+accept, "-O", tempPath, thumbnail.URL)
 		if err := cmd.Run(); err != nil {
+			_ = os.Remove(tempPath)
 			return "", fmt.Errorf("下载缩略图失败: %w", err)
 		}
+	}
+
+	// 检查下载的文件大小，确保不为空
+	if info, err := os.Stat(tempPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("下载的缩略图文件不存在: %w", err)
+	} else if info.Size() == 0 {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("下载的缩略图文件大小为0（可能下载失败），url=%s", thumbnail.URL)
 	}
 
 	// 检测实际文件类型
@@ -1771,13 +1808,20 @@ func (s *downloadService) generateCoverFromVideo(ctx context.Context, videoDir, 
 	// 封面图路径
 	coverPath := filepath.Join(videoDir, "cover.jpg")
 
+	// 检查视频文件是否存在
+	if _, err := os.Stat(videoPath); err != nil {
+		return fmt.Errorf("视频文件不存在: %w", err)
+	}
+
 	// 使用 ffmpeg 提取视频第一帧
+	// 注意：-ss 放在 -i 之前可以实现快速定位（seek），避免解码整个视频
 	// -ss 0: 从第 0 秒开始
 	// -vframes 1: 只提取 1 帧
 	// -q:v 2: 高质量 JPEG（1-31，数字越小质量越高，2 是高质量）
+	// 如果快速定位失败，尝试不使用 -ss（让 ffmpeg 自动处理）
 	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-ss", "0",
 		"-i", videoPath,
-		"-ss", "00:00:00",
 		"-vframes", "1",
 		"-q:v", "2",
 		"-y", // 覆盖已存在的文件
@@ -1786,18 +1830,104 @@ func (s *downloadService) generateCoverFromVideo(ctx context.Context, videoDir, 
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("提取视频第一帧失败: %w, 输出: %s", err, string(output))
+		// 如果快速定位失败，尝试不使用 -ss（某些格式可能不支持快速定位）
+		logger.Debug().Str("video_path", videoPath).Msg("快速定位失败，尝试不使用 -ss 参数")
+		cmd = exec.CommandContext(ctx, "ffmpeg",
+			"-i", videoPath,
+			"-vframes", "1",
+			"-q:v", "2",
+			"-y",
+			coverPath,
+		)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			// 如果还是失败，尝试更简单的方式（不指定质量）
+			logger.Debug().Str("video_path", videoPath).Str("error", err.Error()).Msg("标准方式失败，尝试简化参数")
+			cmd = exec.CommandContext(ctx, "ffmpeg",
+				"-i", videoPath,
+				"-vframes", "1",
+				"-y",
+				coverPath,
+			)
+			output, err = cmd.CombinedOutput()
+			if err != nil {
+				// 输出更详细的错误信息
+				errorOutput := string(output)
+				if len(errorOutput) > 500 {
+					errorOutput = errorOutput[:500] + "..."
+				}
+				return fmt.Errorf("提取视频第一帧失败: %w, 输出: %s", err, errorOutput)
+			}
+		}
 	}
 
-	// 检查文件是否成功创建
-	if _, err := os.Stat(coverPath); err != nil {
+	// 检查文件是否成功创建且大小不为0
+	if info, err := os.Stat(coverPath); err != nil {
 		return fmt.Errorf("封面图文件未创建: %w", err)
+	} else if info.Size() == 0 {
+		_ = os.Remove(coverPath)
+		return fmt.Errorf("封面图文件大小为0，生成失败")
 	}
 
 	logger.Info().
 		Str("cover_path", coverPath).
 		Str("video_path", videoPath).
 		Msg("已从视频第一帧生成封面图")
+
+	return nil
+}
+
+// useDefaultCover 使用默认封面图（从 assets/default_cover.jpg 复制到视频目录）
+func (s *downloadService) useDefaultCover(videoDir, targetPath string) error {
+	// 尝试多个可能的 assets 目录位置
+	possiblePaths := []string{
+		"./assets/default_cover.jpg", // 当前工作目录
+		"assets/default_cover.jpg",   // 相对路径
+		filepath.Join(filepath.Dir(videoDir), "..", "..", "assets", "default_cover.jpg"), // 从视频目录向上查找
+		filepath.Join("/opt/blueberry/assets/default_cover.jpg"),                         // 默认安装路径
+		filepath.Join("/usr/local/blueberry/assets/default_cover.jpg"),                   // 备用安装路径
+	}
+
+	var defaultCoverPath string
+	for _, path := range possiblePaths {
+		if absPath, err := filepath.Abs(path); err == nil {
+			if _, err := os.Stat(absPath); err == nil {
+				defaultCoverPath = absPath
+				break
+			}
+		}
+		// 也尝试直接使用路径（可能是绝对路径）
+		if _, err := os.Stat(path); err == nil {
+			defaultCoverPath = path
+			break
+		}
+	}
+
+	if defaultCoverPath == "" {
+		return fmt.Errorf("未找到默认封面图文件（assets/default_cover.jpg）")
+	}
+
+	// 复制默认封面图到目标位置
+	srcFile, err := os.Open(defaultCoverPath)
+	if err != nil {
+		return fmt.Errorf("打开默认封面图失败: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(targetPath)
+	if err != nil {
+		return fmt.Errorf("创建目标封面图失败: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("复制默认封面图失败: %w", err)
+	}
+
+	logger.Info().
+		Str("default_cover", defaultCoverPath).
+		Str("target_path", targetPath).
+		Msg("已复制默认封面图到视频目录")
 
 	return nil
 }
