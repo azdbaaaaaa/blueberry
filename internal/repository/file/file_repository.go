@@ -92,6 +92,8 @@ type Repository interface {
 	GetSubtitleLanguagesFromStatus(videoDir string) ([]string, error)
 	// 清理部分下载的文件（.part, .ytdl 等）
 	CleanupPartialFiles(videoDir string) error
+	// 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等），如果存在说明还在下载中
+	HasTemporaryFiles(videoDir string) (bool, []string)
 	// 账号上传计数
 	GetTodayUploadCount(account string) (int, error)
 	IncrementTodayUploadCount(account string) error
@@ -515,12 +517,12 @@ func (r *repository) TruncateTitleForFilename(title, videoID, lang, ext string) 
 	maxFilenameLength := 255 // Linux 文件名最大长度
 	fixedPart := fmt.Sprintf("[%s].%s%s", videoID, lang, ext)
 	maxTitleLength := maxFilenameLength - len(fixedPart)
-	
+
 	titleBytes := []byte(title)
 	if len(titleBytes) <= maxTitleLength {
 		return title
 	}
-	
+
 	// 截断标题，确保不超过最大长度（按字节计算）
 	truncated := titleBytes[:maxTitleLength]
 	// 如果最后一个字节是 UTF-8 字符的中间字节，继续往前截断
@@ -629,23 +631,14 @@ func (r *repository) IsVideoDownloaded(videoDir string) bool {
 
 	// 如果状态文件标记为已下载，还需要验证实际文件是否存在且完整
 	if downloaded {
-		// 检查是否有临时文件（.temp. 或 .part），如果有，说明可能还在下载中
-		entries, err := os.ReadDir(videoDir)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					continue
-				}
-				fileName := entry.Name()
-				// 如果存在临时文件或部分文件，认为下载未完成
-				if strings.Contains(fileName, ".temp.") || strings.Contains(fileName, ".part") {
-					log.Debug().
-						Str("video_dir", videoDir).
-						Str("temp_file", fileName).
-						Msg("检测到临时文件或部分文件，认为视频下载未完成")
-					return false
-				}
-			}
+		// 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等），如果存在说明还在下载中
+		hasTempFiles, tempFiles := r.HasTemporaryFiles(videoDir)
+		if hasTempFiles {
+			log.Debug().
+				Str("video_dir", videoDir).
+				Strs("temp_files", tempFiles).
+				Msg("检测到临时文件，认为视频下载未完成")
+			return false
 		}
 
 		// 验证实际视频文件是否存在
@@ -762,6 +755,7 @@ func (r *repository) IsThumbnailDownloaded(videoDir string) bool {
 }
 
 // GetDownloadVideoStatus 返回视频下载状态、downloaded 标志与错误信息
+// 如果目录中存在临时文件（.part, .temp.mp4, .temp 等），即使状态文件标记为已下载，也会返回 downloaded=false
 func (r *repository) GetDownloadVideoStatus(videoDir string) (string, bool, string, error) {
 	statusFile := filepath.Join(videoDir, "download_status.json")
 	data, err := os.ReadFile(statusFile)
@@ -785,6 +779,20 @@ func (r *repository) GetDownloadVideoStatus(videoDir string) (string, bool, stri
 		if e, ok := video["error"].(string); ok {
 			errMsg = e
 		}
+
+		// 如果状态文件标记为已下载，需要检查目录中是否存在临时文件
+		// 如果存在临时文件，说明还在下载中，不应该视为下载完成
+		if dl {
+			hasTempFiles, tempFiles := r.HasTemporaryFiles(videoDir)
+			if hasTempFiles {
+				log.Debug().
+					Str("video_dir", videoDir).
+					Strs("temp_files", tempFiles).
+					Msg("状态文件标记为已下载，但检测到临时文件，认为下载未完成")
+				dl = false
+			}
+		}
+
 		return st, dl, errMsg, nil
 	}
 	return "", false, "", nil
@@ -1403,6 +1411,39 @@ func (r *repository) CleanupPartialFiles(videoDir string) error {
 	}
 
 	return nil
+}
+
+// HasTemporaryFiles 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等）
+// 如果存在临时文件，说明文件还在下载中，不应该上传
+// 返回：是否存在临时文件，以及找到的临时文件列表
+func (r *repository) HasTemporaryFiles(videoDir string) (bool, []string) {
+	var tempFiles []string
+
+	// 读取目录中的所有文件
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		// 如果无法读取目录，返回 false（不阻止上传）
+		return false, nil
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileName := entry.Name()
+		// 检查文件名中是否包含临时文件标识
+		// 匹配模式：.part, .temp.mp4, .temp, .temp. 等
+		if strings.Contains(fileName, ".part") ||
+			strings.Contains(fileName, ".temp.mp4") ||
+			strings.Contains(fileName, ".temp.") ||
+			strings.HasSuffix(fileName, ".temp") {
+			filePath := filepath.Join(videoDir, fileName)
+			tempFiles = append(tempFiles, filePath)
+		}
+	}
+
+	return len(tempFiles) > 0, tempFiles
 }
 
 // GetSubtitleLanguagesFromStatus 从 download_status.json 中提取字幕语言列表

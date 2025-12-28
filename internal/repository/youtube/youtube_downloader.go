@@ -318,72 +318,98 @@ func (d *downloader) downloadVideoOnce(ctx context.Context, channelID, videoURL 
 							// 定期输出心跳日志，并检查文件大小变化
 							elapsed := time.Since(startTime)
 
-							// 检查目标文件的大小变化（用于检测是否真的在下载）
+							// 检查整个目录中所有下载相关文件的总大小变化（而不是只看单个文件）
+							// 这样可以正确检测分离的视频和音频流下载进度
 							var currentSize int64 = 0
-							var filePath string
-							// 尝试查找视频文件（可能还在下载中，文件名可能包含 .part 或 .ytdl）
-							videoPattern := filepath.Join(videoDir, videoID+"_*.mp4*")
-							matches, _ := filepath.Glob(videoPattern)
-							if len(matches) == 0 {
-								// 如果没有找到 .mp4 文件，尝试查找 .part 文件
-								partPattern := filepath.Join(videoDir, videoID+"_*.part")
-								matches, _ = filepath.Glob(partPattern)
-							}
-							if len(matches) > 0 {
-								filePath = matches[0]
-								if info, err := os.Stat(filePath); err == nil {
-									currentSize = info.Size()
+							var filePaths []string
 
-									// 检查文件大小是否变化
-									fileSizeMutex.Lock()
-									if lastFileSize == -1 {
-										// 第一次检测到文件，初始化
-										lastFileSize = currentSize
-										lastFileSizeTime = time.Now()
-									} else if currentSize != lastFileSize {
-										// 文件大小有变化，更新记录
-										lastFileSize = currentSize
-										lastFileSizeTime = time.Now()
+							// 读取目录中的所有文件
+							entries, err := os.ReadDir(videoDir)
+							if err == nil {
+								for _, entry := range entries {
+									if entry.IsDir() {
+										continue
 									}
-									// 计算文件大小无变化的时长（只有在已初始化后才计算）
-									var noSizeChangeDuration time.Duration
-									if !lastFileSizeTime.IsZero() {
-										noSizeChangeDuration = time.Since(lastFileSizeTime)
-									}
-									fileSizeMutex.Unlock()
+									fileName := entry.Name()
+									// 检查是否是下载相关的文件
+									// 排除状态文件、字幕、封面等：.json, .jpg, .srt, .vtt, .ass, .description
+									ext := strings.ToLower(filepath.Ext(fileName))
+									isDownloadFile := false
 
-									// 检查是否超过5分钟文件大小无变化
-									if currentSize > 0 && !lastFileSizeTime.IsZero() && noSizeChangeDuration > fileSizeTimeout {
-										logger.Warn().
-											Int("strategy_index", i+1).
-											Str("client", t.client).
-											Bool("with_cookies", t.includeCookie).
-											Dur("elapsed", elapsed).
-											Int64("file_size", currentSize).
-											Dur("no_size_change_duration", noSizeChangeDuration).
-											Dur("file_size_timeout", fileSizeTimeout).
-											Msg("检测到文件大小长时间无变化，可能已卡住，将终止并尝试下一个策略")
-										// 终止当前命令
-										if cmd.Process != nil {
-											cmd.Process.Kill()
+									// 检查文件扩展名：.part, .mp4, .m4a, .webm, .mkv, .ytdl
+									if ext == ".part" || ext == ".mp4" || ext == ".m4a" ||
+										ext == ".webm" || ext == ".mkv" || ext == ".ytdl" {
+										isDownloadFile = true
+									}
+									// 也检查文件名中是否包含 .part（可能文件名中有 .part）
+									if !isDownloadFile && strings.Contains(fileName, ".part") {
+										isDownloadFile = true
+									}
+
+									if isDownloadFile {
+										filePath := filepath.Join(videoDir, fileName)
+										if info, err := os.Stat(filePath); err == nil {
+											currentSize += info.Size()
+											filePaths = append(filePaths, fileName)
 										}
-										// 等待进程结束
-										<-cmdDone
-										// 设置错误并继续到下一个策略
-										err = fmt.Errorf("文件大小无变化超时（%v 文件大小未变化）", noSizeChangeDuration)
-										outputStr = outputBuilder.String()
-										lastErr = err
-										lastOutput = outputStr
-										logger.Error().
-											Int("strategy_index", i+1).
-											Str("client", t.client).
-											Bool("with_cookies", t.includeCookie).
-											Int64("file_size", currentSize).
-											Dur("no_size_change_duration", noSizeChangeDuration).
-											Err(err).
-											Msg("下载失败（文件大小无变化超时），继续尝试下一种策略")
-										goto processOutput
 									}
+								}
+							}
+
+							if currentSize > 0 {
+								// 检查总大小是否变化
+								fileSizeMutex.Lock()
+								if lastFileSize == -1 {
+									// 第一次检测到文件，初始化
+									lastFileSize = currentSize
+									lastFileSizeTime = time.Now()
+								} else if currentSize != lastFileSize {
+									// 总大小有变化，更新记录
+									lastFileSize = currentSize
+									lastFileSizeTime = time.Now()
+								}
+								// 计算文件大小无变化的时长（只有在已初始化后才计算）
+								var noSizeChangeDuration time.Duration
+								if !lastFileSizeTime.IsZero() {
+									noSizeChangeDuration = time.Since(lastFileSizeTime)
+								}
+								fileSizeMutex.Unlock()
+
+								// 检查是否超过5分钟总大小无变化
+								if !lastFileSizeTime.IsZero() && noSizeChangeDuration > fileSizeTimeout {
+									logger.Warn().
+										Int("strategy_index", i+1).
+										Str("client", t.client).
+										Bool("with_cookies", t.includeCookie).
+										Dur("elapsed", elapsed).
+										Int64("total_size", currentSize).
+										Int("file_count", len(filePaths)).
+										Strs("files", filePaths).
+										Dur("no_size_change_duration", noSizeChangeDuration).
+										Dur("file_size_timeout", fileSizeTimeout).
+										Msg("检测到目录中所有文件总大小长时间无变化，可能已卡住，将终止并尝试下一个策略")
+									// 终止当前命令
+									if cmd.Process != nil {
+										cmd.Process.Kill()
+									}
+									// 等待进程结束
+									<-cmdDone
+									// 设置错误并继续到下一个策略
+									err = fmt.Errorf("文件大小无变化超时（%v 文件大小未变化）", noSizeChangeDuration)
+									outputStr = outputBuilder.String()
+									lastErr = err
+									lastOutput = outputStr
+									logger.Error().
+										Int("strategy_index", i+1).
+										Str("client", t.client).
+										Bool("with_cookies", t.includeCookie).
+										Int64("total_size", currentSize).
+										Int("file_count", len(filePaths)).
+										Strs("files", filePaths).
+										Dur("no_size_change_duration", noSizeChangeDuration).
+										Err(err).
+										Msg("下载失败（文件大小无变化超时），继续尝试下一种策略")
+									goto processOutput
 								}
 							}
 
@@ -399,8 +425,9 @@ func (d *downloader) downloadVideoOnce(ctx context.Context, channelID, videoURL 
 								Str("client", t.client).
 								Bool("with_cookies", t.includeCookie).
 								Dur("elapsed", elapsed).
-								Int64("file_size", currentSize).
-								Str("file_path", filePath).
+								Int64("total_size", currentSize).
+								Int("file_count", len(filePaths)).
+								Strs("files", filePaths).
 								Dur("no_size_change_duration", noSizeChangeDuration).
 								Msg("下载进行中（心跳日志）")
 						case <-ctx.Done():

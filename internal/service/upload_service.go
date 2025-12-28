@@ -132,12 +132,34 @@ func (s *uploadService) UploadSingleVideo(ctx context.Context, videoPath string,
 		return fmt.Errorf("路径不存在: %s", videoPath)
 	}
 
-	// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
-	if strings.Contains(filepath.Base(videoFile), ".temp.") {
+	// 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等），如果存在说明还在下载中，不应该上传
+	hasTempFiles, tempFiles := s.fileManager.HasTemporaryFiles(videoDir)
+	if hasTempFiles {
+		logger.Warn().
+			Str("video_dir", videoDir).
+			Strs("temp_files", tempFiles).
+			Msg("目录中存在临时文件，下载未完成，跳过上传")
+		return nil
+	}
+
+	// 检查视频文件名是否包含 .temp. 或 .temp.mp4，如果是则说明还在下载中，不应该上传
+	videoBaseName := filepath.Base(videoFile)
+	if strings.Contains(videoBaseName, ".temp.") ||
+		strings.Contains(videoBaseName, ".temp.mp4") ||
+		strings.HasSuffix(videoBaseName, ".temp") {
 		logger.Warn().
 			Str("video_file", videoFile).
 			Str("video_dir", videoDir).
-			Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
+			Msg("视频文件是临时文件（.temp. 或 .temp.mp4），下载未完成，跳过上传")
+		return nil
+	}
+
+	// 确保视频文件是完整的 .mp4 文件（不是 .part 文件）
+	if strings.Contains(videoBaseName, ".part") {
+		logger.Warn().
+			Str("video_file", videoFile).
+			Str("video_dir", videoDir).
+			Msg("视频文件是部分下载文件（.part），下载未完成，跳过上传")
 		return nil
 	}
 
@@ -397,13 +419,38 @@ func (s *uploadService) UploadChannel(ctx context.Context, channelURL string) er
 			continue
 		}
 
-		// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
-		if strings.Contains(filepath.Base(videoFile), ".temp.") {
+		// 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等），如果存在说明还在下载中，不应该上传
+		hasTempFiles, tempFiles := s.fileManager.HasTemporaryFiles(videoDir)
+		if hasTempFiles {
+			logger.Warn().
+				Str("video_dir", videoDir).
+				Str("video_id", videoID).
+				Str("title", title).
+				Strs("temp_files", tempFiles).
+				Msg("目录中存在临时文件，下载未完成，跳过上传")
+			continue
+		}
+
+		// 检查视频文件名是否包含 .temp. 或 .temp.mp4，如果是则说明还在下载中，不应该上传
+		videoBaseName := filepath.Base(videoFile)
+		if strings.Contains(videoBaseName, ".temp.") ||
+			strings.Contains(videoBaseName, ".temp.mp4") ||
+			strings.HasSuffix(videoBaseName, ".temp") {
 			logger.Warn().
 				Str("video_file", videoFile).
 				Str("video_id", videoID).
 				Str("title", title).
-				Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
+				Msg("视频文件是临时文件（.temp. 或 .temp.mp4），下载未完成，跳过上传")
+			continue
+		}
+
+		// 确保视频文件是完整的 .mp4 文件（不是 .part 文件）
+		if strings.Contains(videoBaseName, ".part") {
+			logger.Warn().
+				Str("video_file", videoFile).
+				Str("video_id", videoID).
+				Str("title", title).
+				Msg("视频文件是部分下载文件（.part），下载未完成，跳过上传")
 			continue
 		}
 
@@ -627,12 +674,35 @@ func (s *uploadService) UploadChannelDir(ctx context.Context, channelDir string)
 			continue
 		}
 
-		// 检查视频文件名是否包含 .temp.，如果是则说明还在下载中，不应该上传
-		if strings.Contains(filepath.Base(videoFile), ".temp.") {
+		// 检查目录中是否存在临时文件（.part, .temp.mp4, .temp 等），如果存在说明还在下载中，不应该上传
+		hasTempFiles, tempFiles := s.fileManager.HasTemporaryFiles(videoDir)
+		if hasTempFiles {
+			logger.Warn().
+				Str("video_dir", videoDir).
+				Str("video_id", videoID).
+				Strs("temp_files", tempFiles).
+				Msg("目录中存在临时文件，下载未完成，跳过上传")
+			continue
+		}
+
+		// 检查视频文件名是否包含 .temp. 或 .temp.mp4，如果是则说明还在下载中，不应该上传
+		videoBaseName := filepath.Base(videoFile)
+		if strings.Contains(videoBaseName, ".temp.") ||
+			strings.Contains(videoBaseName, ".temp.mp4") ||
+			strings.HasSuffix(videoBaseName, ".temp") {
 			logger.Warn().
 				Str("video_file", videoFile).
 				Str("video_id", videoID).
-				Msg("视频文件是临时文件（.temp.），下载未完成，跳过上传")
+				Msg("视频文件是临时文件（.temp. 或 .temp.mp4），下载未完成，跳过上传")
+			continue
+		}
+
+		// 确保视频文件是完整的 .mp4 文件（不是 .part 文件）
+		if strings.Contains(videoBaseName, ".part") {
+			logger.Warn().
+				Str("video_file", videoFile).
+				Str("video_id", videoID).
+				Msg("视频文件是部分下载文件（.part），下载未完成，跳过上传")
 			continue
 		}
 
