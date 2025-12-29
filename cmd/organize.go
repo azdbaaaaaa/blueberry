@@ -189,16 +189,20 @@ var organizeCmd = &cobra.Command{
 				// 统计频道信息
 				channelStats.TotalVideos++
 
-				// 检查视频下载状态
-				if fileRepo.IsVideoDownloaded(videoDir) {
-					channelStats.DownloadedVideos++
-				}
-
-				// 检查上传状态
+				// 检查上传状态（先检查上传，因为已上传的视频肯定已经下载过）
 				isUploaded := fileRepo.IsVideoUploaded(videoDir)
 				if isUploaded {
 					channelStats.UploadedVideos++
 					globalStats.TotalUploadedVideos++
+				}
+
+				// 检查视频下载状态
+				// 如果视频已上传，也应该算作已下载（因为上传前必须先下载）
+				// 这样可以处理上传后删除原视频文件的情况
+				isDownloaded := fileRepo.IsVideoDownloaded(videoDir) || isUploaded
+				if isDownloaded {
+					channelStats.DownloadedVideos++
+					globalStats.TotalDownloadedVideos++
 				}
 
 				// 统计字幕数量
@@ -215,9 +219,6 @@ var organizeCmd = &cobra.Command{
 
 				// 更新全局统计
 				globalStats.TotalVideos++
-				if fileRepo.IsVideoDownloaded(videoDir) {
-					globalStats.TotalDownloadedVideos++
-				}
 
 				// 检查是否已经 organize 过（除非使用 --force）
 				organizeMarker := filepath.Join(videoDir, ".organized")
