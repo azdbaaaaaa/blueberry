@@ -1,7 +1,7 @@
 youtube:
   cookies_file: "./cookies/yt_17.txt" # jimmy7zhou@gmail.com
-  video_limit_before_rest: 40  # 成功下载多少个视频后休息（0 表示不限制）
-  concurrent_fragments: 1  # 并发下载片段数，提高下载速度
+  video_limit_before_rest: 50  # 成功下载多少个视频后休息（0 表示不限制）
+  concurrent_fragments: 2  # 并发下载片段数，提高下载速度
   sleep_interval_seconds: 30  # 睡眠间隔时间（秒）
   video_limit_rest_duration: 120  # 休息时长（分钟），默认1小时，实际休息时间会在此基础上随机增加 0-10%
   
