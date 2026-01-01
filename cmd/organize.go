@@ -20,7 +20,8 @@ import (
 )
 
 var (
-	organizeForce bool // 强制重新处理，无视 .organized 标记
+	organizeForce   bool   // 强制重新处理，无视 .organized 标记
+	organizeDateStr string // 指定归档目录的日期（格式：YYYYMMDD），默认为当前日期
 )
 
 // sanitizeFilename 清理文件名中的非法字符，确保文件名可以安全使用
@@ -91,7 +92,16 @@ var organizeCmd = &cobra.Command{
 		fileRepo := file.NewRepository(downloadsDir)
 
 		// 创建归档目录（在项目根目录下）
-		dateStr := time.Now().Format("20060102")
+		// 如果指定了日期，使用指定的日期；否则使用当前日期
+		dateStr := organizeDateStr
+		if dateStr == "" {
+			dateStr = time.Now().Format("20060102")
+		}
+		// 验证日期格式（YYYYMMDD）
+		if len(dateStr) != 8 {
+			logger.Error().Str("date", dateStr).Msg("日期格式错误，应为 YYYYMMDD（例如：20251228）")
+			os.Exit(1)
+		}
 		archiveDir := filepath.Join(projectRoot, fmt.Sprintf("output-%s", dateStr))
 		subtitlesDir := filepath.Join(archiveDir, "subtitles")
 
@@ -618,5 +628,6 @@ func generateNetworkStatsSummary(detailFile, dateStr, projectRoot string) error 
 
 func init() {
 	organizeCmd.Flags().BoolVar(&organizeForce, "force", false, "强制重新处理，无视 .organized 标记文件")
+	organizeCmd.Flags().StringVar(&organizeDateStr, "date", "", "指定归档目录的日期（格式：YYYYMMDD，例如：20251228），默认为当前日期")
 	rootCmd.AddCommand(organizeCmd)
 }

@@ -1171,20 +1171,20 @@ func (d *downloader) renameSubtitlesToTitleFormat(videoDir, videoID, title strin
 			}
 		}
 
-		// 重命名文件
-		if err := os.Rename(subtitlePath, newPath); err != nil {
+		// 复制文件为新格式（保留旧格式文件）
+		if err := copyFile(subtitlePath, newPath); err != nil {
 			logger.Warn().
 				Str("old_path", originalPath).
 				Str("new_path", newPath).
 				Err(err).
-				Msg("重命名字幕文件失败，保持原文件名")
+				Msg("复制字幕文件失败，保持原文件名")
 			renamedPaths = append(renamedPaths, subtitlePath)
 		} else {
 			logger.Info().
 				Str("old_path", originalPath).
 				Str("new_path", newPath).
 				Str("lang", lang).
-				Msg("字幕文件已重命名为 {title}[{video_id}].{lang}.{ext} 格式")
+				Msg("字幕文件已复制为新格式 {title}[{video_id}].{lang}.{ext}（保留旧格式文件）")
 			renamedPaths = append(renamedPaths, newPath)
 		}
 	}
