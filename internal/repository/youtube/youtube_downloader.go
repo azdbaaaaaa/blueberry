@@ -187,7 +187,7 @@ func (d *downloader) downloadVideoOnce(ctx context.Context, channelID, videoURL 
 					// 用于跟踪文件大小变化
 					lastFileSize := int64(-1)          // 初始化为 -1，表示还未检测到文件
 					lastFileSizeTime := time.Time{}    // 初始化为零值，表示还未开始计时
-					fileSizeTimeout := 5 * time.Minute // 5分钟文件大小无变化则认为卡住
+					fileSizeTimeout := 2 * time.Minute // 2分钟文件大小无变化则认为卡住
 					var fileSizeMutex sync.Mutex
 
 					// 读取 stdout
@@ -376,7 +376,7 @@ func (d *downloader) downloadVideoOnce(ctx context.Context, channelID, videoURL 
 								}
 								fileSizeMutex.Unlock()
 
-								// 检查是否超过5分钟总大小无变化
+								// 检查是否超过2分钟总大小无变化
 								if !lastFileSizeTime.IsZero() && noSizeChangeDuration > fileSizeTimeout {
 									logger.Warn().
 										Int("strategy_index", i+1).
@@ -1480,15 +1480,13 @@ func (d *downloader) stripResolutionFromSubtitleFilenames(videoDir string, subti
 // 对于大文件，合并时间可能较长，因此增加重试次数和等待时间
 // 如果文件大小长时间无变化（超过30秒），且已重试6次，返回 ErrFileStuck 以便重新下载
 func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, error) {
-	const maxRetries = 12                    // 最大重试次数，大文件合并可能需要更长时间
-	const stuckCheckRetries = 6              // 如果文件大小无变化，检查6次后认为卡住
-	const baseRetryDelay = 15 * time.Second  // 基础等待时间
-	const maxRetryDelay = 60 * time.Second   // 最大等待时间（随重试次数递增）
-	const noChangeTimeout = 30 * time.Second // 文件大小无变化的超时时间
+	const maxRetries = 12                   // 最大重试次数，大文件合并可能需要更长时间
+	const baseRetryDelay = 15 * time.Second // 基础等待时间
+	const maxRetryDelay = 60 * time.Second  // 最大等待时间（随重试次数递增）
+	const noChangeTimeout = 2 * time.Minute // 文件大小无变化的超时时间（2分钟无变化直接返回错误）
 
 	var lastPartFileSize int64 = -1
 	var lastPartFileTime time.Time
-	var noChangeStartTime time.Time
 
 	for i := 0; i < maxRetries; i++ {
 		// 先尝试查找完整文件
@@ -1516,66 +1514,74 @@ func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, e
 			return "", fmt.Errorf("未找到视频文件（已重试 %d 次）", i+1)
 		}
 
-		// 有 .part 文件，检查文件大小是否还在变化
-		// 找到最大的 .part 文件（通常是主文件）
-		var largestPartFile string
-		var largestSize int64 = -1
-		for _, match := range matches {
-			if info, err := os.Stat(match); err == nil {
-				if info.Size() > largestSize {
-					largestSize = info.Size()
-					largestPartFile = match
+		// 有 .part 文件，检查目录中所有视频相关文件的总大小是否还在变化
+		// 检查整个目录中所有下载相关文件的总大小变化（而不是只看单个文件）
+		// 这样可以正确检测分离的视频和音频流下载进度，以及多个 .part 片段文件
+		var currentTotalSize int64 = 0
+		var downloadFilePaths []string
+
+		// 读取目录中的所有文件
+		entries, err := os.ReadDir(videoDir)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				fileName := entry.Name()
+				// 检查是否是下载相关的文件
+				// 排除状态文件、字幕、封面等：.json, .jpg, .srt, .vtt, .ass, .description
+				ext := strings.ToLower(filepath.Ext(fileName))
+				isDownloadFile := false
+
+				// 检查文件扩展名：.part, .mp4, .m4a, .webm, .mkv, .ytdl
+				if ext == ".part" || ext == ".mp4" || ext == ".m4a" ||
+					ext == ".webm" || ext == ".mkv" || ext == ".ytdl" {
+					isDownloadFile = true
+				}
+				// 也检查文件名中是否包含 .part（可能文件名中有 .part）
+				if !isDownloadFile && strings.Contains(fileName, ".part") {
+					isDownloadFile = true
+				}
+
+				if isDownloadFile {
+					filePath := filepath.Join(videoDir, fileName)
+					if info, err := os.Stat(filePath); err == nil {
+						currentTotalSize += info.Size()
+						downloadFilePaths = append(downloadFilePaths, fileName)
+					}
 				}
 			}
 		}
 
-		if largestPartFile != "" {
-			// 检查文件大小是否还在变化
-			if lastPartFileSize >= 0 && largestSize == lastPartFileSize {
-				// 文件大小没有变化，可能已经停止下载或正在合并
+		if currentTotalSize > 0 {
+			// 检查总大小是否还在变化
+			if lastPartFileSize >= 0 && currentTotalSize == lastPartFileSize {
+				// 总大小没有变化，可能已经停止下载或正在合并
 				noChangeDuration := time.Since(lastPartFileTime)
 				if noChangeDuration > noChangeTimeout {
-					// 文件大小超过30秒没有变化，记录开始时间
-					if noChangeStartTime.IsZero() {
-						noChangeStartTime = time.Now()
-						logger.Warn().
-							Str("video_dir", videoDir).
-							Str("video_id", videoID).
-							Str("part_file", largestPartFile).
-							Int64("file_size", largestSize).
-							Dur("no_change_duration", noChangeDuration).
-							Msg("检测到 .part 文件大小长时间无变化，开始计时")
-					}
-
-					// 如果已经重试了6次且文件大小仍然无变化，认为下载卡住
-					if i >= stuckCheckRetries-1 {
-						noChangeTotalDuration := time.Since(noChangeStartTime)
-						logger.Error().
-							Str("video_dir", videoDir).
-							Str("video_id", videoID).
-							Str("part_file", largestPartFile).
-							Int64("file_size", largestSize).
-							Int("retry_count", i+1).
-							Dur("no_change_duration", noChangeDuration).
-							Dur("no_change_total_duration", noChangeTotalDuration).
-							Msg("检测到 .part 文件大小长时间无变化且已重试6次，认为下载卡住")
-						return "", fmt.Errorf("%w: 文件大小超过 %v 无变化，已重试 %d 次", ErrFileStuck, noChangeTotalDuration, i+1)
-					}
+					// 总大小超过2分钟没有变化，直接返回错误，进入重新下载逻辑
+					logger.Error().
+						Str("video_dir", videoDir).
+						Str("video_id", videoID).
+						Int64("total_size", currentTotalSize).
+						Int("file_count", len(downloadFilePaths)).
+						Dur("no_change_duration", noChangeDuration).
+						Msg("检测到视频相关文件总大小2分钟无变化，认为下载卡住，将重新下载")
+					return "", fmt.Errorf("%w: 文件总大小超过 %v 无变化", ErrFileStuck, noChangeDuration)
 				}
 			} else {
-				// 文件大小有变化，说明还在下载中，重置无变化计时
+				// 总大小有变化，说明还在下载中，重置无变化计时
 				if lastPartFileSize >= 0 {
 					logger.Info().
 						Str("video_dir", videoDir).
 						Str("video_id", videoID).
-						Str("part_file", largestPartFile).
-						Int64("old_size", lastPartFileSize).
-						Int64("new_size", largestSize).
-						Msg("检测到 .part 文件大小仍在变化，下载进行中")
+						Int64("old_total_size", lastPartFileSize).
+						Int64("new_total_size", currentTotalSize).
+						Int("file_count", len(downloadFilePaths)).
+						Msg("检测到视频相关文件总大小仍在变化，下载进行中")
 				}
-				lastPartFileSize = largestSize
+				lastPartFileSize = currentTotalSize
 				lastPartFileTime = time.Now()
-				noChangeStartTime = time.Time{} // 重置无变化计时
 			}
 		}
 
@@ -1595,7 +1601,8 @@ func (d *downloader) findVideoFileWithRetry(videoDir, videoID string) (string, e
 				Int("max_retries", maxRetries).
 				Dur("delay", currentDelay).
 				Strs("part_files", matches).
-				Int64("part_file_size", largestSize).
+				Int64("total_size", currentTotalSize).
+				Int("file_count", len(downloadFilePaths)).
 				Msg("检测到 .part 文件，等待文件下载/合并完成（大文件合并可能需要更长时间）")
 			time.Sleep(currentDelay)
 		}
