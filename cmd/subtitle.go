@@ -17,6 +17,7 @@ import (
 var (
 	subtitleChannelDir string
 	subtitleVideoDir   string
+	subtitleForce      bool
 )
 
 var subtitleCmd = &cobra.Command{
@@ -53,7 +54,7 @@ var subtitleCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "解析视频目录路径失败: %v\n", err)
 				os.Exit(1)
 			}
-			errExecute = downloadService.FixSubtitlesForVideoDir(ctx, absVideoDir)
+			errExecute = downloadService.FixSubtitlesForVideoDir(ctx, absVideoDir, subtitleForce)
 		} else if subtitleChannelDir != "" {
 			// 处理指定频道目录
 			absChannelDir, err := filepath.Abs(subtitleChannelDir)
@@ -61,10 +62,10 @@ var subtitleCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "解析频道目录路径失败: %v\n", err)
 				os.Exit(1)
 			}
-			errExecute = downloadService.FixSubtitlesForChannelDir(ctx, absChannelDir)
+			errExecute = downloadService.FixSubtitlesForChannelDir(ctx, absChannelDir, subtitleForce)
 		} else {
 			// 默认行为：处理所有频道
-			errExecute = downloadService.FixSubtitles(ctx)
+			errExecute = downloadService.FixSubtitles(ctx, subtitleForce)
 		}
 
 		if errExecute != nil {
@@ -77,5 +78,6 @@ var subtitleCmd = &cobra.Command{
 func init() {
 	subtitleCmd.Flags().StringVar(&subtitleChannelDir, "channel-dir", "", "指定要处理的频道目录（例如：downloads/Comic-likerhythm）")
 	subtitleCmd.Flags().StringVar(&subtitleVideoDir, "video-dir", "", "指定要处理的视频目录（例如：downloads/Comic-likerhythm/videoTitle）")
+	subtitleCmd.Flags().BoolVar(&subtitleForce, "force", false, "强制模式：忽略状态文件，对所有缺失的字幕进行下载，并确保新旧格式都存在")
 	rootCmd.AddCommand(subtitleCmd)
 }

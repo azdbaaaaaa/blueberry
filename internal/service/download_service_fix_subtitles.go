@@ -136,7 +136,7 @@ func (s *subtitleStatusFile) updateStatus(videoDir, videoID, videoURL, lang stri
 }
 
 // FixSubtitles 补充缺失的字幕文件（处理所有频道）
-func (s *downloadService) FixSubtitles(ctx context.Context) error {
+func (s *downloadService) FixSubtitles(ctx context.Context, force bool) error {
 	// 获取输出目录
 	outputDir := s.cfg.Output.Directory
 	if outputDir == "" {
@@ -185,7 +185,7 @@ func (s *downloadService) FixSubtitles(ctx context.Context) error {
 			Int("total", len(channelDirs)).
 			Str("channel_dir", dir).
 			Msg("开始处理频道")
-		if err := s.FixSubtitlesForChannelDir(ctx, dir); err != nil {
+		if err := s.FixSubtitlesForChannelDir(ctx, dir, force); err != nil {
 			logger.Error().
 				Str("channel_dir", dir).
 				Err(err).
@@ -198,7 +198,7 @@ func (s *downloadService) FixSubtitles(ctx context.Context) error {
 }
 
 // FixSubtitlesForChannelDir 补充指定频道目录的字幕文件
-func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channelDir string) error {
+func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channelDir string, force bool) error {
 	logger.Info().Str("channel_dir", channelDir).Msg("开始补充字幕文件（指定频道）")
 
 	// 获取输出目录（用于状态文件路径）
@@ -583,7 +583,7 @@ func (s *downloadService) FixSubtitlesForChannelDir(ctx context.Context, channel
 }
 
 // FixSubtitlesForVideoDir 补充指定视频目录的字幕文件
-func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir string) error {
+func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir string, force bool) error {
 	logger.Info().Str("video_dir", videoDir).Msg("开始补充字幕文件（指定视频）")
 
 	// 获取输出目录（用于状态文件路径）
@@ -625,21 +625,45 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 		videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
 	}
 
-	// 检查视频下载状态，只处理下载成功的视频
+	// 检查视频下载状态
 	videoStatus, videoDownloaded, _, err := s.fileManager.GetDownloadVideoStatus(videoDir)
 	if err != nil {
-		return fmt.Errorf("无法读取视频下载状态: %w", err)
+		// 如果无法读取状态，在非 force 模式下返回错误
+		if !force {
+			return fmt.Errorf("无法读取视频下载状态: %w", err)
+		}
+		// Force 模式下，即使无法读取状态也继续处理
+		logger.Warn().
+			Err(err).
+			Str("video_id", videoID).
+			Msg("无法读取视频下载状态，force 模式下继续处理字幕")
 	}
 
-	// 只有视频下载成功（状态为 completed 且 downloaded 为 true）才处理字幕
-	if videoStatus != "completed" || !videoDownloaded {
-		return fmt.Errorf("视频下载未成功（状态: %s, downloaded: %v），跳过字幕补充（由下载逻辑处理）", videoStatus, videoDownloaded)
+	// 非 force 模式：只有视频下载成功才处理字幕
+	if !force {
+		if videoStatus != "completed" || !videoDownloaded {
+			return fmt.Errorf("视频下载未成功（状态: %s, downloaded: %v），跳过字幕补充（由下载逻辑处理）", videoStatus, videoDownloaded)
+		}
+		logger.Info().
+			Str("video_id", videoID).
+			Str("title", videoInfo.Title).
+			Msg("处理视频（视频已下载成功）")
+	} else {
+		// Force 模式：即使视频未下载也处理字幕
+		if videoStatus == "completed" && videoDownloaded {
+			logger.Info().
+				Str("video_id", videoID).
+				Str("title", videoInfo.Title).
+				Msg("处理视频（视频已下载成功，force 模式）")
+		} else {
+			logger.Info().
+				Str("video_id", videoID).
+				Str("title", videoInfo.Title).
+				Str("video_status", videoStatus).
+				Bool("video_downloaded", videoDownloaded).
+				Msg("处理视频（视频未下载，force 模式下仍处理字幕）")
+		}
 	}
-
-	logger.Info().
-		Str("video_id", videoID).
-		Str("title", videoInfo.Title).
-		Msg("处理视频（视频已下载成功）")
 
 	// 获取或创建状态记录
 	record := statusFile.getRecord(videoDir)
@@ -660,112 +684,231 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 	skippedSubtitles := 0
 	failedSubtitles := 0
 
+	// 准备新格式文件名
+	sanitizedTitle := sanitizeTitle(videoInfo.Title)
+
 	for _, lang := range languages {
-		// 检查状态记录
-		statusInfo, hasStatus := record.Statuses[lang]
-
-		// 如果状态是已下载或不存在，跳过
-		if hasStatus {
-			if statusInfo.Status == SubtitleStatusDownloaded {
-				// 验证文件是否还存在
-				if statusInfo.FilePath != "" {
-					if _, err := os.Stat(statusInfo.FilePath); err == nil {
-						logger.Debug().
-							Str("video_id", videoID).
-							Str("lang", lang).
-							Msg("字幕已下载，跳过")
-						skippedSubtitles++
-						continue
-					}
-					// 文件不存在，需要重新下载
-					logger.Info().
-						Str("video_id", videoID).
-						Str("lang", lang).
-						Str("file_path", statusInfo.FilePath).
-						Msg("字幕文件已丢失，需要重新下载")
-					needDownloadLangs = append(needDownloadLangs, lang)
-					continue
-				}
-			} else if statusInfo.Status == SubtitleStatusNotFound {
-				// 该语言没有字幕，跳过
-				logger.Debug().
-					Str("video_id", videoID).
-					Str("lang", lang).
-					Msg("该语言没有字幕，跳过")
-				skippedSubtitles++
-				continue
-			}
-			// 如果是 failed 或 pending，继续尝试下载
-		}
-
-		// 检查是否已有新格式的字幕文件：title[video_id].lang.srt
-		sanitizedTitle := sanitizeTitle(videoInfo.Title)
 		truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
 		expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", truncatedTitle, videoID, lang)
 		expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
+
+		// 旧格式文件名：{video_id}.{lang}.srt
+		expectedOldFormatName := fmt.Sprintf("%s.%s.srt", videoID, lang)
+		expectedOldFormatPath := filepath.Join(videoDir, expectedOldFormatName)
+
+		// 检查新旧格式文件是否存在
+		newFormatExists := false
+		oldFormatExists := false
 		if _, err := os.Stat(expectedNewFormatPath); err == nil {
-			// 新格式文件已存在
-			statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusDownloaded, expectedNewFormatPath, "")
-			logger.Debug().
-				Str("video_id", videoID).
-				Str("lang", lang).
-				Str("file_path", expectedNewFormatPath).
-				Msg("新格式字幕文件已存在，跳过")
-			skippedSubtitles++
-			continue
+			newFormatExists = true
+		}
+		if _, err := os.Stat(expectedOldFormatPath); err == nil {
+			oldFormatExists = true
 		}
 
-		// 检查是否有旧格式的字幕文件，如果有则复制为新格式
-		var oldFormatPath string
-		for _, subPath := range subtitleFiles {
-			base := filepath.Base(subPath)
-			// 跳过已经是新格式的文件（检查原始标题和截断后的标题）
-			if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
-				continue
-			}
-			// 检查文件名中是否包含该语言代码
-			if strings.Contains(base, "."+lang+".") ||
-				strings.Contains(base, "-"+lang+".") ||
-				strings.Contains(base, "_"+lang+".") ||
-				strings.HasSuffix(base, "."+lang+".srt") ||
-				strings.HasSuffix(base, "-"+lang+".srt") ||
-				strings.HasSuffix(base, "_"+lang+".srt") {
-				oldFormatPath = subPath
-				break
-			}
-		}
+		// 在 force 模式下，忽略状态文件，直接检查文件是否存在
+		if !force {
+			// 非 force 模式：检查状态记录
+			statusInfo, hasStatus := record.Statuses[lang]
 
-		if oldFormatPath != "" {
-			// 找到旧格式字幕文件，复制为新格式
-			if err := s.copyFile(oldFormatPath, expectedNewFormatPath); err != nil {
-				logger.Warn().
-					Err(err).
-					Str("video_id", videoID).
-					Str("lang", lang).
-					Str("old_path", oldFormatPath).
-					Str("new_path", expectedNewFormatPath).
-					Msg("复制旧格式字幕文件失败")
-				// 复制失败，继续尝试下载
-				needDownloadLangs = append(needDownloadLangs, lang)
-			} else {
-				// 复制成功
-				statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusDownloaded, expectedNewFormatPath, "")
-				logger.Info().
-					Str("video_id", videoID).
-					Str("lang", lang).
-					Str("old_path", oldFormatPath).
-					Str("new_path", expectedNewFormatPath).
-					Msg("已从旧格式复制为新格式字幕文件")
-				downloadedSubtitles++
-				// 保存状态文件
-				if err := statusFile.save(); err != nil {
-					logger.Warn().Err(err).Msg("保存字幕状态文件失败")
+			// 如果状态是已下载或不存在，跳过
+			if hasStatus {
+				if statusInfo.Status == SubtitleStatusDownloaded {
+					// 验证文件是否还存在
+					if statusInfo.FilePath != "" {
+						if _, err := os.Stat(statusInfo.FilePath); err == nil {
+							logger.Debug().
+								Str("video_id", videoID).
+								Str("lang", lang).
+								Msg("字幕已下载，跳过")
+							skippedSubtitles++
+							continue
+						}
+						// 文件不存在，需要重新下载
+						logger.Info().
+							Str("video_id", videoID).
+							Str("lang", lang).
+							Str("file_path", statusInfo.FilePath).
+							Msg("字幕文件已丢失，需要重新下载")
+						needDownloadLangs = append(needDownloadLangs, lang)
+						continue
+					}
+				} else if statusInfo.Status == SubtitleStatusNotFound {
+					// 该语言没有字幕，跳过
+					logger.Debug().
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Msg("该语言没有字幕，跳过")
+					skippedSubtitles++
+					continue
 				}
+				// 如果是 failed 或 pending，继续尝试下载
+			}
+
+			// 非 force 模式：如果新格式文件已存在，跳过
+			if newFormatExists {
+				statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusDownloaded, expectedNewFormatPath, "")
+				logger.Debug().
+					Str("video_id", videoID).
+					Str("lang", lang).
+					Str("file_path", expectedNewFormatPath).
+					Msg("新格式字幕文件已存在，跳过")
+				skippedSubtitles++
 				continue
+			}
+
+			// 非 force 模式：检查是否有旧格式的字幕文件，如果有则复制为新格式
+			var oldFormatPath string
+			for _, subPath := range subtitleFiles {
+				base := filepath.Base(subPath)
+				// 跳过已经是新格式的文件（检查原始标题和截断后的标题）
+				if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
+					continue
+				}
+				// 检查文件名中是否包含该语言代码
+				if strings.Contains(base, "."+lang+".") ||
+					strings.Contains(base, "-"+lang+".") ||
+					strings.Contains(base, "_"+lang+".") ||
+					strings.HasSuffix(base, "."+lang+".srt") ||
+					strings.HasSuffix(base, "-"+lang+".srt") ||
+					strings.HasSuffix(base, "_"+lang+".srt") {
+					oldFormatPath = subPath
+					break
+				}
+			}
+
+			if oldFormatPath != "" {
+				// 找到旧格式字幕文件，复制为新格式
+				if err := s.copyFile(oldFormatPath, expectedNewFormatPath); err != nil {
+					logger.Warn().
+						Err(err).
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("old_path", oldFormatPath).
+						Str("new_path", expectedNewFormatPath).
+						Msg("复制旧格式字幕文件失败")
+					// 复制失败，继续尝试下载
+					needDownloadLangs = append(needDownloadLangs, lang)
+				} else {
+					// 复制成功
+					statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusDownloaded, expectedNewFormatPath, "")
+					logger.Info().
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("old_path", oldFormatPath).
+						Str("new_path", expectedNewFormatPath).
+						Msg("已从旧格式复制为新格式字幕文件")
+					downloadedSubtitles++
+					// 保存状态文件
+					if err := statusFile.save(); err != nil {
+						logger.Warn().Err(err).Msg("保存字幕状态文件失败")
+					}
+					continue
+				}
+			} else {
+				// 没有找到旧格式，需要下载
+				needDownloadLangs = append(needDownloadLangs, lang)
 			}
 		} else {
-			// 没有找到旧格式，需要下载
-			needDownloadLangs = append(needDownloadLangs, lang)
+			// Force 模式：确保新旧格式都存在
+			// 查找所有可能的旧格式文件（不限于 {video_id}.{lang}.srt）
+			var foundOldFormatPath string
+			for _, subPath := range subtitleFiles {
+				base := filepath.Base(subPath)
+				// 跳过已经是新格式的文件
+				if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
+					continue
+				}
+				// 检查文件名中是否包含该语言代码（旧格式可能是多种形式）
+				if strings.Contains(base, "."+lang+".") ||
+					strings.Contains(base, "-"+lang+".") ||
+					strings.Contains(base, "_"+lang+".") ||
+					strings.HasSuffix(base, "."+lang+".srt") ||
+					strings.HasSuffix(base, "-"+lang+".srt") ||
+					strings.HasSuffix(base, "_"+lang+".srt") {
+					foundOldFormatPath = subPath
+					break
+				}
+			}
+
+			// 检查标准旧格式是否存在
+			if !oldFormatExists && foundOldFormatPath != "" {
+				oldFormatExists = true
+				expectedOldFormatPath = foundOldFormatPath
+			}
+
+			if newFormatExists && oldFormatExists {
+				// 两种格式都存在，跳过
+				logger.Debug().
+					Str("video_id", videoID).
+					Str("lang", lang).
+					Msg("新旧格式字幕文件都已存在，跳过")
+				skippedSubtitles++
+				continue
+			} else if newFormatExists && !oldFormatExists {
+				// 只有新格式，创建标准旧格式副本 {video_id}.{lang}.srt
+				standardOldFormatPath := filepath.Join(videoDir, fmt.Sprintf("%s.%s.srt", videoID, lang))
+				if err := s.copyFile(expectedNewFormatPath, standardOldFormatPath); err != nil {
+					logger.Warn().
+						Err(err).
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("new_path", expectedNewFormatPath).
+						Str("old_path", standardOldFormatPath).
+						Msg("从新格式复制为旧格式失败")
+					needDownloadLangs = append(needDownloadLangs, lang)
+				} else {
+					logger.Info().
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("new_path", expectedNewFormatPath).
+						Str("old_path", standardOldFormatPath).
+						Msg("已从新格式复制为旧格式字幕文件")
+					downloadedSubtitles++
+				}
+			} else if !newFormatExists && oldFormatExists {
+				// 只有旧格式，创建新格式副本
+				if err := s.copyFile(expectedOldFormatPath, expectedNewFormatPath); err != nil {
+					logger.Warn().
+						Err(err).
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("old_path", expectedOldFormatPath).
+						Str("new_path", expectedNewFormatPath).
+						Msg("从旧格式复制为新格式失败")
+					needDownloadLangs = append(needDownloadLangs, lang)
+				} else {
+					logger.Info().
+						Str("video_id", videoID).
+						Str("lang", lang).
+						Str("old_path", expectedOldFormatPath).
+						Str("new_path", expectedNewFormatPath).
+						Msg("已从旧格式复制为新格式字幕文件")
+					downloadedSubtitles++
+					// 如果旧格式不是标准格式，也创建标准旧格式副本
+					if expectedOldFormatPath != filepath.Join(videoDir, fmt.Sprintf("%s.%s.srt", videoID, lang)) {
+						standardOldFormatPath := filepath.Join(videoDir, fmt.Sprintf("%s.%s.srt", videoID, lang))
+						if err := s.copyFile(expectedOldFormatPath, standardOldFormatPath); err != nil {
+							logger.Warn().
+								Err(err).
+								Str("video_id", videoID).
+								Str("lang", lang).
+								Str("old_path", expectedOldFormatPath).
+								Str("standard_old_path", standardOldFormatPath).
+								Msg("创建标准旧格式副本失败")
+						} else {
+							logger.Info().
+								Str("video_id", videoID).
+								Str("lang", lang).
+								Str("standard_old_path", standardOldFormatPath).
+								Msg("已创建标准旧格式字幕文件副本")
+						}
+					}
+				}
+			} else {
+				// 两种格式都不存在，需要下载
+				needDownloadLangs = append(needDownloadLangs, lang)
+			}
 		}
 	}
 
@@ -832,6 +975,64 @@ func (s *downloadService) FixSubtitlesForVideoDir(ctx context.Context, videoDir 
 						Str("file_path", result.filePath).
 						Msg("字幕下载成功")
 					downloadedSubtitles++
+
+					// Force 模式：确保新旧格式都存在
+					if force {
+						// 准备新旧格式路径
+						sanitizedTitle := sanitizeTitle(videoInfo.Title)
+						truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
+						expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", truncatedTitle, videoID, lang)
+						expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
+						expectedOldFormatName := fmt.Sprintf("%s.%s.srt", videoID, lang)
+						expectedOldFormatPath := filepath.Join(videoDir, expectedOldFormatName)
+
+						// 检查下载的文件是新格式还是旧格式
+						downloadedFile := result.filePath
+						downloadedBase := filepath.Base(downloadedFile)
+						isNewFormat := strings.HasPrefix(downloadedBase, sanitizedTitle+"["+videoID+"]") || strings.HasPrefix(downloadedBase, truncatedTitle+"["+videoID+"]")
+
+						if isNewFormat {
+							// 下载的是新格式，创建旧格式副本
+							if _, err := os.Stat(expectedOldFormatPath); os.IsNotExist(err) {
+								if err := s.copyFile(downloadedFile, expectedOldFormatPath); err != nil {
+									logger.Warn().
+										Err(err).
+										Str("video_id", videoID).
+										Str("lang", lang).
+										Str("new_path", downloadedFile).
+										Str("old_path", expectedOldFormatPath).
+										Msg("从新格式创建旧格式副本失败")
+								} else {
+									logger.Info().
+										Str("video_id", videoID).
+										Str("lang", lang).
+										Str("old_path", expectedOldFormatPath).
+										Msg("已创建旧格式字幕文件副本")
+								}
+							}
+						} else {
+							// 下载的是旧格式，创建新格式副本
+							if _, err := os.Stat(expectedNewFormatPath); os.IsNotExist(err) {
+								if err := s.copyFile(downloadedFile, expectedNewFormatPath); err != nil {
+									logger.Warn().
+										Err(err).
+										Str("video_id", videoID).
+										Str("lang", lang).
+										Str("old_path", downloadedFile).
+										Str("new_path", expectedNewFormatPath).
+										Msg("从旧格式创建新格式副本失败")
+								} else {
+									logger.Info().
+										Str("video_id", videoID).
+										Str("lang", lang).
+										Str("new_path", expectedNewFormatPath).
+										Msg("已创建新格式字幕文件副本")
+									// 更新状态文件中的路径为新格式路径
+									statusFile.updateStatus(videoDir, videoID, videoURL, lang, SubtitleStatusDownloaded, expectedNewFormatPath, "")
+								}
+							}
+						}
+					}
 				}
 			}
 		}

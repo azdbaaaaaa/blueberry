@@ -42,6 +42,8 @@ type YouTubeChannel struct {
 	Limit int `mapstructure:"limit"`
 	// Offset: 从第几个开始（基于 channel_info.json 顺序）；<0 表示从 0 开始
 	Offset int `mapstructure:"offset"`
+	// VideoIDs: 指定要处理的 video_id 列表（如果配置了，将只保留匹配的视频，忽略 limit 和 offset）
+	VideoIDs []string `mapstructure:"video_ids"`
 }
 
 type Account struct {
@@ -69,6 +71,9 @@ type YouTubeConfig struct {
 	// CookiesFile cookies 文件路径（Netscape 格式或 JSON 格式）
 	// 如果设置了此选项，会使用 --cookies 参数
 	CookiesFile string `mapstructure:"cookies_file"`
+	// VideoIDs: 全局指定要处理的 video_id 列表（如果配置了，将在所有频道中查找匹配的视频，忽略 limit 和 offset）
+	// 优先级：全局 video_ids > 频道级别的 video_ids > limit/offset
+	VideoIDs []string `mapstructure:"video_ids"`
 	// ForceDownloadUndownloadable 当之前被标记为“不可下载”时，是否仍强制尝试下载
 	// 默认 false：跳过这些视频；true：继续尝试下载
 	ForceDownloadUndownloadable bool `mapstructure:"force_download_undownloadable"`

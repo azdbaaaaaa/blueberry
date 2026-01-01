@@ -48,13 +48,13 @@ type DownloadService interface {
 
 	// FixSubtitles 补充缺失的字幕文件
 	// 遍历所有视频目录，检查字幕文件，补充缺失的字幕
-	FixSubtitles(ctx context.Context) error
+	FixSubtitles(ctx context.Context, force bool) error
 
 	// FixSubtitlesForChannelDir 补充指定频道目录的字幕文件
-	FixSubtitlesForChannelDir(ctx context.Context, channelDir string) error
+	FixSubtitlesForChannelDir(ctx context.Context, channelDir string, force bool) error
 
 	// FixSubtitlesForVideoDir 补充指定视频目录的字幕文件
-	FixSubtitlesForVideoDir(ctx context.Context, videoDir string) error
+	FixSubtitlesForVideoDir(ctx context.Context, videoDir string, force bool) error
 }
 
 type downloadService struct {
@@ -178,14 +178,47 @@ func (s *downloadService) parseChannel(ctx context.Context, channel *config.YouT
 
 	// 应用筛选
 	selectedVideos := videos[start:end]
-	logger.Info().
-		Int("total_videos", len(videos)).
-		Int("offset", offset).
-		Int("limit", limit).
-		Int("selected_count", len(selectedVideos)).
-		Int("range_start", start).
-		Int("range_end", end).
-		Msg("应用 limit/offset 筛选")
+
+	// 确定要使用的 video_ids（优先级：全局配置 > 频道级别配置）
+	var videoIDsToUse []string
+	var videoIDsSource string
+	if len(s.cfg.YouTube.VideoIDs) > 0 {
+		videoIDsToUse = s.cfg.YouTube.VideoIDs
+		videoIDsSource = "全局配置"
+	} else if len(channel.VideoIDs) > 0 {
+		videoIDsToUse = channel.VideoIDs
+		videoIDsSource = "频道配置"
+	}
+
+	// 如果配置了 video_ids，根据 video_id 进行过滤（忽略 limit 和 offset）
+	if len(videoIDsToUse) > 0 {
+		videoIDSet := make(map[string]bool)
+		for _, id := range videoIDsToUse {
+			videoIDSet[id] = true
+		}
+		filteredVideos := make([]youtube.Video, 0)
+		for _, video := range videos {
+			if videoIDSet[video.ID] {
+				filteredVideos = append(filteredVideos, video)
+			}
+		}
+		selectedVideos = filteredVideos
+		logger.Info().
+			Int("total_videos", len(videos)).
+			Strs("video_ids", videoIDsToUse).
+			Str("source", videoIDsSource).
+			Int("matched_count", len(selectedVideos)).
+			Msg("应用 video_ids 筛选（忽略 limit/offset）")
+	} else {
+		logger.Info().
+			Int("total_videos", len(videos)).
+			Int("offset", offset).
+			Int("limit", limit).
+			Int("selected_count", len(selectedVideos)).
+			Int("range_start", start).
+			Int("range_end", end).
+			Msg("应用 limit/offset 筛选")
+	}
 
 	// 如果新解析的视频数量与已存在的不同，记录日志
 	if existingCount > 0 && len(selectedVideos) != existingCount {
@@ -462,8 +495,23 @@ func (s *downloadService) cleanupOutOfRangeVideoDirs(channelID string, selectedV
 			continue
 		}
 
-		// 不在同步范围内，检查是否已下载
-		if s.fileManager.IsVideoDownloaded(videoDir) {
+		// 不在同步范围内，检查是否已下载或已上传
+		isDownloaded := s.fileManager.IsVideoDownloaded(videoDir)
+		isUploaded := s.fileManager.IsVideoUploaded(videoDir)
+
+		// 如果已上传成功，即使文件不存在也应该保留目录
+		// （因为可能根据 delete_original_after_upload 配置删除了原文件）
+		if isUploaded {
+			logger.Debug().
+				Str("channel_id", channelID).
+				Str("video_id", videoID).
+				Str("video_dir", videoDir).
+				Msg("视频已上传成功，保留目录（不在同步范围内，即使文件不存在）")
+			skippedCount++
+			continue
+		}
+
+		if isDownloaded {
 			// 已下载，保留目录
 			logger.Debug().
 				Str("channel_id", channelID).
@@ -474,7 +522,7 @@ func (s *downloadService) cleanupOutOfRangeVideoDirs(channelID string, selectedV
 			continue
 		}
 
-		// 未下载，删除目录
+		// 未下载且未上传，删除目录
 		logger.Info().
 			Str("channel_id", channelID).
 			Str("video_id", videoID).
