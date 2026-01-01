@@ -1066,13 +1066,15 @@ func (s *downloadService) downloadSubtitlesOnly(ctx context.Context, videoDir, v
 	}
 
 	// 构建 yt-dlp 命令参数（只下载字幕）
+	// 使用 %(id)s.%(ext)s 格式，yt-dlp 会自动在字幕文件名中添加语言代码
+	// 最终格式：{video_id}.{lang}.srt
 	args := []string{
 		"--skip-download", // 跳过视频下载
 		"--write-sub",
 		"--write-auto-sub",
 		"--sub-langs", strings.Join(languages, ","), // 一次性指定所有语言
 		"--convert-subs", "srt", // 转换为 SRT 格式
-		"-o", filepath.Join(videoDir, "%(title)s.%(ext)s"), // 输出路径
+		"-o", filepath.Join(videoDir, "%(id)s.%(ext)s"), // 输出格式：{video_id}.{lang}.srt（yt-dlp 会自动添加语言代码）
 	}
 
 	// 添加 cookies
@@ -1116,63 +1118,52 @@ func (s *downloadService) downloadSubtitlesOnly(ctx context.Context, videoDir, v
 	}
 
 	// 处理每个语言的字幕文件
+	// 只保留 yt-dlp 原始格式 {video_id}.{lang}.srt，不进行重命名
+	// 重命名将在 organize 命令中统一处理
 	results := make(map[string]subtitleDownloadResult)
 	for _, lang := range languages {
-		expectedNewFormatName := fmt.Sprintf("%s[%s].%s.srt", sanitizeTitle(title), videoID, lang)
-		expectedNewFormatPath := filepath.Join(videoDir, expectedNewFormatName)
-
-		// 检查是否已经是新格式
-		if _, err := os.Stat(expectedNewFormatPath); err == nil {
-			// 新格式文件已存在
-			results[lang] = subtitleDownloadResult{filePath: expectedNewFormatPath}
-			continue
-		}
-
-		// 查找该语言的字幕文件（可能是旧格式）
+		// 查找该语言的字幕文件（yt-dlp 原始格式：{video_id}.{lang}.srt）
 		var foundPath string
-		for _, subPath := range subtitleFiles {
-			base := filepath.Base(subPath)
-			// 跳过已经是新格式的文件（检查是否以 title[videoID] 开头）
-			sanitizedTitle := sanitizeTitle(title)
-			if strings.HasPrefix(base, sanitizedTitle+"["+videoID+"]") {
-				continue
-			}
-			// 也检查截断后的标题（可能之前已经截断过）
-			truncatedTitle := truncateTitleForFilename(sanitizedTitle, videoID, lang, ".srt")
-			if strings.HasPrefix(base, truncatedTitle+"["+videoID+"]") {
-				continue
-			}
-			// 检查文件名中是否包含语言代码
-			// 支持多种旧格式：
-			// - title.lang.srt
-			// - video_id_lang.srt
-			// - title-lang.srt
-			// - title_lang.srt
-			// - aid_lang.srt
-			if strings.Contains(base, "."+lang+".") ||
-				strings.Contains(base, "-"+lang+".") ||
-				strings.Contains(base, "_"+lang+".") ||
-				strings.HasSuffix(base, "."+lang+".srt") ||
-				strings.HasSuffix(base, "-"+lang+".srt") ||
-				strings.HasSuffix(base, "_"+lang+".srt") {
-				foundPath = subPath
-				break
+		expectedOldFormatName := fmt.Sprintf("%s.%s.srt", videoID, lang)
+		expectedOldFormatPath := filepath.Join(videoDir, expectedOldFormatName)
+
+		// 优先查找标准格式 {video_id}.{lang}.srt
+		if _, err := os.Stat(expectedOldFormatPath); err == nil {
+			foundPath = expectedOldFormatPath
+		} else {
+			// 如果标准格式不存在，查找其他可能的格式
+			for _, subPath := range subtitleFiles {
+				base := filepath.Base(subPath)
+				// 检查文件名中是否包含语言代码
+				// 支持多种格式：
+				// - {video_id}.{lang}.srt (标准格式)
+				// - {video_id}.{lang}.frame.srt
+				// - title.{lang}.srt
+				// - {video_id}_{lang}.srt
+				if strings.Contains(base, "."+lang+".") ||
+					strings.Contains(base, "-"+lang+".") ||
+					strings.Contains(base, "_"+lang+".") ||
+					strings.HasSuffix(base, "."+lang+".srt") ||
+					strings.HasSuffix(base, "-"+lang+".srt") ||
+					strings.HasSuffix(base, "_"+lang+".srt") {
+					// 跳过新格式（包含 [video_id] 的格式）
+					if strings.Contains(base, fmt.Sprintf("[%s]", videoID)) {
+						continue
+					}
+					foundPath = subPath
+					break
+				}
 			}
 		}
 
 		if foundPath != "" {
-			// 复制为新格式（不删除旧格式）
-			if err := s.copyFile(foundPath, expectedNewFormatPath); err != nil {
-				logger.Warn().Err(err).Str("old_path", foundPath).Str("new_path", expectedNewFormatPath).Str("lang", lang).Msg("复制字幕文件失败")
-				results[lang] = subtitleDownloadResult{filePath: foundPath}
-			} else {
-				logger.Info().
-					Str("old_path", foundPath).
-					Str("new_path", expectedNewFormatPath).
-					Str("lang", lang).
-					Msg("已从旧格式复制为新格式字幕文件")
-				results[lang] = subtitleDownloadResult{filePath: expectedNewFormatPath}
-			}
+			// 找到字幕文件，返回原始格式路径（不进行重命名）
+			results[lang] = subtitleDownloadResult{filePath: foundPath}
+			logger.Debug().
+				Str("video_id", videoID).
+				Str("lang", lang).
+				Str("file_path", foundPath).
+				Msg("找到字幕文件（保留原始格式，将在 organize 时重命名）")
 		} else {
 			// 未找到该语言的字幕文件
 			results[lang] = subtitleDownloadResult{
