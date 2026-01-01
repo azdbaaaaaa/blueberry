@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	organizeForce   bool   // 强制重新处理，无视 .organized 标记
+	organizeForce   bool   // 强制重新处理，无视 .organized 标记，且不看上传状态，不使用 aid 子目录
 	organizeDateStr string // 指定归档目录的日期（格式：YYYYMMDD），默认为当前日期
 )
 
@@ -131,22 +131,22 @@ var organizeCmd = &cobra.Command{
 
 		// 频道统计信息
 		type ChannelStats struct {
-			ChannelID              string `json:"channel_id"`
-			TotalVideos            int    `json:"total_videos"`
-			DownloadedVideos       int    `json:"downloaded_videos"`
-			TotalSubtitles         int    `json:"total_subtitles"`
-			UploadedVideos         int    `json:"uploaded_videos"`
-			UploadedWithSubtitles  int    `json:"uploaded_with_subtitles"`
+			ChannelID             string `json:"channel_id"`
+			TotalVideos           int    `json:"total_videos"`
+			DownloadedVideos      int    `json:"downloaded_videos"`
+			TotalSubtitles        int    `json:"total_subtitles"`
+			UploadedVideos        int    `json:"uploaded_videos"`
+			UploadedWithSubtitles int    `json:"uploaded_with_subtitles"`
 		}
 		channelStatsList := make([]ChannelStats, 0)
 
 		// 全局统计
 		var globalStats struct {
-			TotalVideos            int `json:"total_videos"`
-			TotalDownloadedVideos  int `json:"total_downloaded_videos"`
-			TotalUploadedVideos    int `json:"total_uploaded_videos"`
+			TotalVideos                int `json:"total_videos"`
+			TotalDownloadedVideos      int `json:"total_downloaded_videos"`
+			TotalUploadedVideos        int `json:"total_uploaded_videos"`
 			TotalUploadedWithSubtitles int `json:"total_uploaded_with_subtitles"`
-			TotalSubtitles         int `json:"total_subtitles"`
+			TotalSubtitles             int `json:"total_subtitles"`
 		}
 
 		// 遍历所有频道目录
@@ -240,32 +240,37 @@ var organizeCmd = &cobra.Command{
 					}
 				}
 
-				// 检查上传状态
-				uploadStatusFile := filepath.Join(videoDir, "upload_status.json")
-				if !fileRepo.IsVideoUploaded(videoDir) {
-					skippedNotUploaded++
-					continue
-				}
-
-				// 读取 upload_status.json 获取 aid
-				var uploadStatus map[string]interface{}
-				uploadStatusData, err := os.ReadFile(uploadStatusFile)
-				if err != nil {
-					logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取 upload_status.json 失败，跳过")
-					continue
-				}
-				if err := json.Unmarshal(uploadStatusData, &uploadStatus); err != nil {
-					logger.Warn().Err(err).Str("video_dir", videoDir).Msg("解析 upload_status.json 失败，跳过")
-					continue
-				}
-
-				aid := ""
-				if aidVal, ok := uploadStatus["bilibili_aid"]; ok {
-					if aidStr, ok := aidVal.(string); ok {
-						aid = aidStr
-					} else if aidNum, ok := aidVal.(float64); ok {
-						aid = fmt.Sprintf("%.0f", aidNum)
+				// 检查上传状态（force 模式下跳过）
+				var aid string
+				if !organizeForce {
+					uploadStatusFile := filepath.Join(videoDir, "upload_status.json")
+					if !fileRepo.IsVideoUploaded(videoDir) {
+						skippedNotUploaded++
+						continue
 					}
+
+					// 读取 upload_status.json 获取 aid
+					var uploadStatus map[string]interface{}
+					uploadStatusData, err := os.ReadFile(uploadStatusFile)
+					if err != nil {
+						logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取 upload_status.json 失败，跳过")
+						continue
+					}
+					if err := json.Unmarshal(uploadStatusData, &uploadStatus); err != nil {
+						logger.Warn().Err(err).Str("video_dir", videoDir).Msg("解析 upload_status.json 失败，跳过")
+						continue
+					}
+
+					if aidVal, ok := uploadStatus["bilibili_aid"]; ok {
+						if aidStr, ok := aidVal.(string); ok {
+							aid = aidStr
+						} else if aidNum, ok := aidVal.(float64); ok {
+							aid = fmt.Sprintf("%.0f", aidNum)
+						}
+					}
+				} else {
+					// Force 模式：跳过上传状态检查，不使用 aid
+					logger.Debug().Str("video_dir", videoDir).Msg("Force 模式：跳过上传状态检查")
 				}
 
 				// 读取 video_info.json 获取 video_id 和 title
@@ -333,15 +338,17 @@ var organizeCmd = &cobra.Command{
 					}
 				}
 
-				// 创建按 aid 分组的字幕目录
+				// 创建字幕目录
 				aidSubtitlesDir := subtitlesDir
-				if aid != "" {
+				if !organizeForce && aid != "" {
+					// 非 force 模式且 aid 不为空，使用 subtitles/{aid}/ 目录
 					aidSubtitlesDir = filepath.Join(subtitlesDir, aid)
 					if err := os.MkdirAll(aidSubtitlesDir, 0755); err != nil {
 						logger.Warn().Err(err).Str("aid", aid).Str("dir", aidSubtitlesDir).Msg("创建 aid 字幕目录失败，使用默认目录")
 						aidSubtitlesDir = subtitlesDir
 					}
 				}
+				// Force 模式或 aid 为空，直接使用 subtitlesDir（不创建 aid 子目录）
 
 				// 处理每个语言的字幕
 				for lang, files := range subtitleByLang {
@@ -349,18 +356,34 @@ var organizeCmd = &cobra.Command{
 					var subtitleExt string
 					var needCreateNewFormat bool
 
-					// 优先使用新格式
-					if newFile, ok := files["new"]; ok {
-						subtitleFile = newFile
-						subtitleExt = filepath.Ext(subtitleFile)[1:] // 去掉点
-						needCreateNewFormat = false
-					} else if oldFile, ok := files["old"]; ok {
-						// 如果新格式不存在，使用旧格式并创建新格式副本
-						subtitleFile = oldFile
-						subtitleExt = filepath.Ext(subtitleFile)[1:] // 去掉点
-						needCreateNewFormat = true
+					// Force 模式：只处理新格式字幕
+					if organizeForce {
+						if newFile, ok := files["new"]; ok {
+							subtitleFile = newFile
+							subtitleExt = filepath.Ext(subtitleFile)[1:] // 去掉点
+							needCreateNewFormat = false
+						} else {
+							// Force 模式下，如果没有新格式，跳过
+							logger.Debug().
+								Str("video_id", videoID).
+								Str("lang", lang).
+								Msg("Force 模式：跳过旧格式字幕，只处理新格式")
+							continue
+						}
 					} else {
-						continue
+						// 非 force 模式：优先使用新格式，如果没有则使用旧格式
+						if newFile, ok := files["new"]; ok {
+							subtitleFile = newFile
+							subtitleExt = filepath.Ext(subtitleFile)[1:] // 去掉点
+							needCreateNewFormat = false
+						} else if oldFile, ok := files["old"]; ok {
+							// 如果新格式不存在，使用旧格式并创建新格式副本
+							subtitleFile = oldFile
+							subtitleExt = filepath.Ext(subtitleFile)[1:] // 去掉点
+							needCreateNewFormat = true
+						} else {
+							continue
+						}
 					}
 
 					// 如果需要创建新格式，先创建副本
@@ -407,12 +430,20 @@ var organizeCmd = &cobra.Command{
 						if err == nil {
 							if err := os.WriteFile(destPath, data, 0644); err == nil {
 								copiedCount++
-								logger.Info().
-									Str("lang", lang).
-									Str("dest", destPath).
-									Str("aid", aid).
-									Str("video_id", videoID).
-									Msg("已复制字幕文件")
+								if organizeForce {
+									logger.Info().
+										Str("lang", lang).
+										Str("dest", destPath).
+										Str("video_id", videoID).
+										Msg("已复制字幕文件（force 模式）")
+								} else {
+									logger.Info().
+										Str("lang", lang).
+										Str("dest", destPath).
+										Str("aid", aid).
+										Str("video_id", videoID).
+										Msg("已复制字幕文件")
+								}
 							} else {
 								logger.Warn().Err(err).Str("dest", destPath).Msg("复制字幕失败")
 							}
@@ -494,8 +525,11 @@ var organizeCmd = &cobra.Command{
 // generateNetworkStatsSummary 从详细统计文件中生成汇总统计（已废弃，流量统计现在使用 JSON 格式）
 // 保留函数定义以避免编译错误，但不再使用
 func generateNetworkStatsSummary(detailFile, dateStr, projectRoot string) error {
-	return nil // 不再生成文本格式的汇总统计
-	logger.Info().Str("detail_file", detailFile).Msg("生成流量汇总统计")
+	// 不再生成文本格式的汇总统计
+	_ = detailFile
+	_ = dateStr
+	_ = projectRoot
+	return nil
 
 	// 读取详细文件内容
 	content, err := os.ReadFile(detailFile)
@@ -627,7 +661,7 @@ func generateNetworkStatsSummary(detailFile, dateStr, projectRoot string) error 
 }
 
 func init() {
-	organizeCmd.Flags().BoolVar(&organizeForce, "force", false, "强制重新处理，无视 .organized 标记文件")
+	organizeCmd.Flags().BoolVar(&organizeForce, "force", false, "强制模式：无视 .organized 标记文件，不看上传状态，不使用 aid 子目录，直接将所有新格式字幕文件放在 subtitles 目录下")
 	organizeCmd.Flags().StringVar(&organizeDateStr, "date", "", "指定归档目录的日期（格式：YYYYMMDD，例如：20251228），默认为当前日期")
 	rootCmd.AddCommand(organizeCmd)
 }
