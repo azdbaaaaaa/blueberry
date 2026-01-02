@@ -10,7 +10,11 @@ youtube_channels:
     languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
     limit: 400
     offset: 0
-
+  - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB/videos"
+    languages: ["en", "id", "th", "zh-Hans"]  # 魔力動漫俱樂部 Mag  564
+    limit: 100
+    offset: 550
+    
 bilibili_accounts:
   account2:
     username: "beMcfuS9ogcHWD2S@gmail.com"

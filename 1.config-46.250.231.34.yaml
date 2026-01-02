@@ -8,6 +8,8 @@ youtube:
 youtube_channels:
   - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB/videos"
     languages: ["en", "id", "th", "zh-Hans"]  # 魔力動漫俱樂部 Mag  564
+    limit: 550
+    offset: 0
 bilibili_accounts:
   account1:
     username: "ghDjd4JW2Fy9ecRq@gmail.com"
