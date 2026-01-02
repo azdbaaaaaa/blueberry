@@ -6,10 +6,10 @@ youtube:
   video_limit_rest_duration: 120  # 休息时长（分钟），默认1小时，实际休息时间会在此基础上随机增加 0-10%
   
 youtube_channels:
-  # - url: "https://www.youtube.com/@Qixiang-Animation/videos"
-  #   languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
-  #   limit: 400
-  #   offset: 0
+  - url: "https://www.youtube.com/@Qixiang-Animation/videos"
+    languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
+    limit: 1
+    offset: 0
   - url: "https://www.youtube.com/@%E9%AD%94%E5%8A%9B%E5%8B%95%E6%BC%AB/videos"
     languages: ["en", "id", "th", "zh-Hans"]  # 魔力動漫俱樂部 Mag  564
     limit: 100
