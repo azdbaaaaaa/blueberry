@@ -32,7 +32,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize, subtitle"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize, subtitle, clear-video-status"
     echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
     echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -48,6 +48,7 @@ if [ $# -lt 1 ]; then
     echo "  disable  - 禁用服务自启动"
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
+    echo "  clear-video-status - 清除配置中 video_ids 视频的上传和下载状态（从对应机器的配置文件读取 video_ids）"
     echo "  sync     - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地，并收集网卡流量详细信息"
     echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
     echo "  subtitle - 在远程服务器上后台执行 subtitle 命令（如果已在执行则跳过）"
@@ -81,7 +82,7 @@ SKIP_COOKIES=false
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize|subtitle)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize|subtitle|clear-video-status)
             ACTIONS+=("$1")
             shift
             ;;
@@ -544,6 +545,289 @@ logs_service_for_ip() {
             remote_exec "tail -f /var/log/blueberry/download.log /var/log/blueberry/download.error.log /var/log/blueberry/upload.log /var/log/blueberry/upload.error.log"
             ;;
     esac
+}
+
+# 清除配置中 video_ids 视频的上传和下载状态（针对单个 IP）
+clear_video_status_for_ip() {
+    local ip=$1
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "清除配置中 video_ids 视频的上传和下载状态..."
+    
+    # 检查配置文件是否存在
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_error "[$ip] 配置文件不存在: $CONFIG_FILE"
+        return 1
+    fi
+    
+    log_ip "$ip" "读取配置文件: $CONFIG_FILE"
+    
+    # 使用 grep 和 sed 提取 video_ids（不依赖 Python yaml 模块）
+    # 优先级：全局配置 > 频道级别配置
+    local video_ids=""
+    local source="none"
+    
+    # 先尝试提取全局配置的 video_ids（youtube.video_ids）
+    # 查找 youtube: 部分下的 video_ids: 列表
+    local in_youtube_section=0
+    local in_video_ids=0
+    local youtube_video_ids=""
+    
+    while IFS= read -r line; do
+        # 检查是否进入 youtube section（顶级键，无缩进或只有空格）
+        if [[ "$line" =~ ^youtube:[[:space:]]*$ ]]; then
+            in_youtube_section=1
+            in_video_ids=0
+            continue
+        fi
+        
+        # 检查是否退出 youtube section（遇到其他顶级键）
+        if [[ "$in_youtube_section" = 1 ]] && [[ "$line" =~ ^[a-zA-Z_][^:]*:[[:space:]]*$ ]] && ! [[ "$line" =~ ^[[:space:]]+ ]]; then
+            in_youtube_section=0
+            in_video_ids=0
+            continue
+        fi
+        
+        # 在 youtube section 中，检查是否进入 video_ids
+        if [[ "$in_youtube_section" = 1 ]] && [[ "$line" =~ ^[[:space:]]+video_ids:[[:space:]]*$ ]]; then
+            in_video_ids=1
+            continue
+        fi
+        
+        # 如果在 video_ids 部分，提取 video_id
+        if [[ "$in_video_ids" = 1 ]]; then
+            # 检查是否退出 video_ids 部分（遇到同级别或更高级别的键）
+            if [[ "$line" =~ ^[[:space:]]+[a-zA-Z_][^:]*:[[:space:]]*$ ]] && ! [[ "$line" =~ ^[[:space:]]+-[[:space:]]* ]]; then
+                # 检查缩进（video_ids 通常是 2 个空格，如果遇到 2 个空格的其他键，说明退出）
+                local spaces=$(echo "$line" | sed 's/^\([[:space:]]*\).*/\1/' | wc -c)
+                if [ "$spaces" -le 3 ]; then
+                    in_video_ids=0
+                    continue
+                fi
+            fi
+            
+            # 提取 video_id（格式：- "video_id" 或 - video_id）
+            if [[ "$line" =~ ^[[:space:]]+-[[:space:]]*\"([^\"]+)\" ]]; then
+                local vid="${BASH_REMATCH[1]}"
+                if [ -n "$vid" ]; then
+                    youtube_video_ids="$youtube_video_ids $vid"
+                fi
+            elif [[ "$line" =~ ^[[:space:]]+-[[:space:]]*([^[:space:]#]+) ]]; then
+                local vid="${BASH_REMATCH[1]}"
+                # 去除可能的引号
+                vid=$(echo "$vid" | sed 's/^"\(.*\)"$/\1/')
+                if [ -n "$vid" ]; then
+                    youtube_video_ids="$youtube_video_ids $vid"
+                fi
+            fi
+        fi
+    done < "$CONFIG_FILE"
+    
+    if [ -n "$youtube_video_ids" ]; then
+        video_ids=$(echo "$youtube_video_ids" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        source="global"
+    else
+        # 如果没有找到全局配置，尝试查找频道级别的配置
+        local channel_video_ids=""
+        local in_channels=0
+        local in_channel_video_ids=0
+        
+        while IFS= read -r line; do
+            # 检查是否进入 youtube_channels section
+            if [[ "$line" =~ ^youtube_channels:[[:space:]]*$ ]]; then
+                in_channels=1
+                continue
+            fi
+            
+            # 检查是否退出 youtube_channels section
+            if [[ "$in_channels" = 1 ]] && [[ "$line" =~ ^[a-zA-Z_][^:]*:[[:space:]]*$ ]] && ! [[ "$line" =~ ^[[:space:]]+ ]]; then
+                in_channels=0
+                in_channel_video_ids=0
+                continue
+            fi
+            
+            # 在 youtube_channels section 中，检查是否进入某个频道的 video_ids
+            if [[ "$in_channels" = 1 ]] && [[ "$line" =~ ^[[:space:]]+video_ids:[[:space:]]*$ ]]; then
+                in_channel_video_ids=1
+                continue
+            fi
+            
+            # 如果在 channel video_ids 部分，提取 video_id
+            if [[ "$in_channel_video_ids" = 1 ]]; then
+                # 检查是否退出 video_ids 部分
+                if [[ "$line" =~ ^[[:space:]]+[a-zA-Z_][^:]*:[[:space:]]*$ ]] && ! [[ "$line" =~ ^[[:space:]]+-[[:space:]]* ]]; then
+                    local spaces=$(echo "$line" | sed 's/^\([[:space:]]*\).*/\1/' | wc -c)
+                    if [ "$spaces" -le 5 ]; then
+                        in_channel_video_ids=0
+                        continue
+                    fi
+                fi
+                
+                # 提取 video_id
+                if [[ "$line" =~ ^[[:space:]]+-[[:space:]]*\"([^\"]+)\" ]]; then
+                    local vid="${BASH_REMATCH[1]}"
+                    if [ -n "$vid" ]; then
+                        channel_video_ids="$channel_video_ids $vid"
+                    fi
+                elif [[ "$line" =~ ^[[:space:]]+-[[:space:]]*([^[:space:]#]+) ]]; then
+                    local vid="${BASH_REMATCH[1]}"
+                    vid=$(echo "$vid" | sed 's/^"\(.*\)"$/\1/')
+                    if [ -n "$vid" ]; then
+                        channel_video_ids="$channel_video_ids $vid"
+                    fi
+                fi
+            fi
+        done < "$CONFIG_FILE"
+        
+        if [ -n "$channel_video_ids" ]; then
+            # 去重（使用 sort -u）
+            video_ids=$(echo "$channel_video_ids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+            source="channels"
+        fi
+    fi
+    
+    # 清理 video_ids（去除首尾空格）
+    video_ids=$(echo "$video_ids" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    if [ -z "$video_ids" ] || [ "$source" = "none" ]; then
+        log_warn "[$ip] 配置文件中未找到 video_ids（请检查 youtube.video_ids 或 youtube_channels[].video_ids）"
+        return 0
+    fi
+    
+    log_ip "$ip" "找到 video_ids（来源: $source）: $video_ids"
+    
+    # 在远程服务器上执行清除状态命令
+    log_ip "$ip" "在远程服务器上清除视频状态..."
+    
+    # 构建 Python 脚本来清除状态（更可靠，避免 shell 转义问题）
+    local clear_python_script=$(cat <<'PYTHON_CLEAR_EOF'
+import json
+import os
+import sys
+
+video_ids = sys.argv[1:]
+
+if not video_ids:
+    print("错误: 未指定 video_id", file=sys.stderr)
+    sys.exit(1)
+
+downloads_dir = "./downloads"
+if not os.path.exists(downloads_dir):
+    print(f"错误: downloads 目录不存在: {downloads_dir}", file=sys.stderr)
+    sys.exit(1)
+
+cleared_count = 0
+not_found_ids = []
+
+# 遍历所有频道目录
+for channel_id in os.listdir(downloads_dir):
+    channel_dir = os.path.join(downloads_dir, channel_id)
+    if not os.path.isdir(channel_dir) or channel_id.startswith('.'):
+        continue
+    
+    # 遍历该频道下的所有视频目录
+    for video_dir_name in os.listdir(channel_dir):
+        video_dir = os.path.join(channel_dir, video_dir_name)
+        if not os.path.isdir(video_dir):
+            continue
+        
+        video_info_file = os.path.join(video_dir, "video_info.json")
+        if not os.path.exists(video_info_file):
+            continue
+        
+        # 读取 video_id
+        try:
+            with open(video_info_file, 'r', encoding='utf-8') as f:
+                video_info = json.load(f)
+            video_id = video_info.get('id', '')
+            if not video_id or video_id not in video_ids:
+                continue
+        except Exception as e:
+            continue
+        
+        # 清除下载状态
+        download_status_file = os.path.join(video_dir, "download_status.json")
+        if os.path.exists(download_status_file):
+            try:
+                with open(download_status_file, 'r', encoding='utf-8') as f:
+                    status = json.load(f)
+                
+                if 'video' not in status:
+                    status['video'] = {}
+                
+                video_url = video_info.get('url', f"https://www.youtube.com/watch?v={video_id}")
+                
+                status['video']['status'] = 'downloading'
+                status['video']['downloaded'] = False
+                status['video']['resource_type'] = 'video'
+                status['video']['url'] = video_url
+                
+                # 清除错误信息
+                if 'error' in status['video']:
+                    del status['video']['error']
+                if 'failed_at' in status['video']:
+                    del status['video']['failed_at']
+                
+                with open(download_status_file, 'w', encoding='utf-8') as f:
+                    json.dump(status, f, indent=2, ensure_ascii=False)
+                print(f"已重置下载状态: {video_id}")
+            except Exception as e:
+                print(f"重置下载状态失败 {video_id}: {e}", file=sys.stderr)
+        
+        # 清除上传状态
+        upload_status_file = os.path.join(video_dir, "upload_status.json")
+        if os.path.exists(upload_status_file):
+            try:
+                os.remove(upload_status_file)
+                print(f"已删除上传状态: {video_id}")
+            except Exception as e:
+                print(f"删除上传状态失败 {video_id}: {e}", file=sys.stderr)
+        
+        cleared_count += 1
+
+# 检查未找到的 video_ids
+for vid in video_ids:
+    found = False
+    for channel_id in os.listdir(downloads_dir):
+        channel_dir = os.path.join(downloads_dir, channel_id)
+        if not os.path.isdir(channel_dir) or channel_id.startswith('.'):
+            continue
+        for video_dir_name in os.listdir(channel_dir):
+            video_dir = os.path.join(channel_dir, video_dir_name)
+            if not os.path.isdir(video_dir):
+                continue
+            video_info_file = os.path.join(video_dir, "video_info.json")
+            if os.path.exists(video_info_file):
+                try:
+                    with open(video_info_file, 'r', encoding='utf-8') as f:
+                        video_info = json.load(f)
+                    if video_info.get('id') == vid:
+                        found = True
+                        break
+                except:
+                    pass
+        if found:
+            break
+    if not found:
+        not_found_ids.append(vid)
+
+print(f"清除完成: 找到 {cleared_count} 个视频")
+if not_found_ids:
+    print(f"未找到的视频: {', '.join(not_found_ids)}", file=sys.stderr)
+PYTHON_CLEAR_EOF
+)
+    
+    # 将 Python 脚本传输到远程服务器并执行
+    local temp_python_script="/tmp/clear_video_status_${ip}_$$.py"
+    echo "$clear_python_script" | remote_exec "cat > $temp_python_script && cd $REMOTE_DIR && python3 $temp_python_script $video_ids && rm -f $temp_python_script"
+    
+    if [ $? -eq 0 ]; then
+        log_ip "$ip" "✓ 视频状态已清除"
+        return 0
+    else
+        log_error "[$ip] 清除视频状态失败"
+        return 1
+    fi
 }
 
 # 清除持久化数据（针对单个 IP）
@@ -1787,6 +2071,14 @@ process_all_ips() {
                 ;;
             reset)
                 if reset_counters_for_ip "$ip"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                    failed_ips+=("$ip")
+                fi
+                ;;
+            clear-video-status)
+                if clear_video_status_for_ip "$ip"; then
                     ((success_count++))
                 else
                     ((fail_count++))

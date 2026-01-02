@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	retryVideoIDs    []string // 要重新下载和上传的 video_id 列表
+	retryVideoIDs     []string // 要重新下载和上传的 video_id 列表
 	retryDownloadOnly bool     // 只重新下载，不上传
 	retryUploadOnly   bool     // 只重新上传，不下载
 	retryAccount      string   // 指定上传时使用的账号名称
+	retryFromConfig   bool     // 从配置文件读取 video_ids
 )
 
 var retryCmd = &cobra.Command{
@@ -30,6 +31,7 @@ var retryCmd = &cobra.Command{
 
 用法：
   blueberry retry <video_id1> <video_id2> ...
+  blueberry retry --from-config  # 从配置文件的 video_ids 读取
 
 示例：
   # 重新下载和上传单个视频
@@ -37,6 +39,9 @@ var retryCmd = &cobra.Command{
 
   # 重新下载和上传多个视频
   blueberry retry rU59tjI587M znwqAD6RAaA abc123xyz
+
+  # 从配置文件中读取 video_ids（全局或频道级别）
+  blueberry retry --from-config
 
   # 只重新下载，不上传
   blueberry retry --download-only rU59tjI587M
@@ -51,17 +56,53 @@ var retryCmd = &cobra.Command{
 4. 重新下载视频（如果指定了 --download-only 或未指定 --upload-only）
 5. 重新上传视频（如果指定了 --upload-only 或未指定 --download-only）`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) == 0 {
-			fmt.Fprintf(os.Stderr, "错误：请至少指定一个 video_id\n")
-			cmd.Help()
-			os.Exit(1)
-		}
-
-		retryVideoIDs = args
-
 		cfg := config.Get()
 		if cfg == nil {
 			fmt.Fprintf(os.Stderr, "配置未加载\n")
+			os.Exit(1)
+		}
+
+		// 如果指定了 --from-config，从配置文件中读取 video_ids
+		if retryFromConfig {
+			// 优先使用全局配置的 video_ids
+			if len(cfg.YouTube.VideoIDs) > 0 {
+				retryVideoIDs = cfg.YouTube.VideoIDs
+				logger.Info().
+					Strs("video_ids", retryVideoIDs).
+					Msg("从全局配置读取 video_ids")
+			} else {
+				// 如果没有全局配置，收集所有频道配置的 video_ids
+				allVideoIDs := make(map[string]bool)
+				for _, ch := range cfg.YouTubeChannels {
+					for _, id := range ch.VideoIDs {
+						allVideoIDs[id] = true
+					}
+				}
+				if len(allVideoIDs) > 0 {
+					retryVideoIDs = make([]string, 0, len(allVideoIDs))
+					for id := range allVideoIDs {
+						retryVideoIDs = append(retryVideoIDs, id)
+					}
+					logger.Info().
+						Strs("video_ids", retryVideoIDs).
+						Msg("从频道配置读取 video_ids")
+				} else {
+					fmt.Fprintf(os.Stderr, "错误：配置文件中未找到 video_ids（请检查 youtube.video_ids 或 youtube_channels[].video_ids）\n")
+					os.Exit(1)
+				}
+			}
+		} else {
+			// 从命令行参数读取
+			if len(args) == 0 {
+				fmt.Fprintf(os.Stderr, "错误：请至少指定一个 video_id，或使用 --from-config 从配置文件读取\n")
+				cmd.Help()
+				os.Exit(1)
+			}
+			retryVideoIDs = args
+		}
+
+		if len(retryVideoIDs) == 0 {
+			fmt.Fprintf(os.Stderr, "错误：未找到要处理的 video_id\n")
 			os.Exit(1)
 		}
 
@@ -73,6 +114,11 @@ var retryCmd = &cobra.Command{
 
 		logger.SetLevel(zerolog.InfoLevel)
 		ctx := context.Background()
+
+		// 如果从配置读取，需要先初始化 logger（因为之前可能还没有初始化）
+		if retryFromConfig {
+			logger.Init(cfg.Logging)
+		}
 
 		downloadsDir := cfg.Output.Directory
 		if downloadsDir == "" {
@@ -324,6 +370,6 @@ func init() {
 	retryCmd.Flags().BoolVar(&retryDownloadOnly, "download-only", false, "只重新下载，不上传")
 	retryCmd.Flags().BoolVar(&retryUploadOnly, "upload-only", false, "只重新上传，不下载")
 	retryCmd.Flags().StringVar(&retryAccount, "account", "", "指定上传时使用的B站账号名称（如果不指定，使用配置中的第一个账号）")
+	retryCmd.Flags().BoolVar(&retryFromConfig, "from-config", false, "从配置文件的 video_ids 读取要处理的视频（优先级：全局配置 > 频道配置）")
 	rootCmd.AddCommand(retryCmd)
 }
-
