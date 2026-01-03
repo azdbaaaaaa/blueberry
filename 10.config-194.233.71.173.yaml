@@ -12,8 +12,8 @@ youtube_channels:
   #   offset: 8000
   - url: "https://www.youtube.com/@Qixiang-Animation/videos"
     languages: ["en", "id", "my", "th", "zh-Hans"]  # Qixiang-Animation  8680
-    limit: 200
-    offset: 3500
+    limit: 3100
+    offset: 3070
 bilibili_accounts:
   account10:
     username: "4CNKjpzf6DeoCOwF@gmail.com"

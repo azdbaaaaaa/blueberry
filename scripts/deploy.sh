@@ -32,7 +32,7 @@ if [ $# -lt 1 ]; then
     log_error "参数不足"
     echo "用法: $0 <action1> [action2] [action3] ... [ip1] [ip2] [ip3] ... [service_type] [--init]"
     echo ""
-    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize, subtitle, clear-video-status"
+    echo "Actions: prepare, install, uninstall, start, stop, restart, status, enable, disable, logs, reset, sync, organize, subtitle, clear-video-status, list-incomplete"
     echo "  - 支持连续执行多个操作，用空格分隔（如: install reset restart）"
     echo "  - 操作将按顺序执行"
     echo "  prepare  - 在远程服务器上安装依赖（install-deps-ubuntu.sh）"
@@ -49,6 +49,7 @@ if [ $# -lt 1 ]; then
     echo "  logs     - 查看服务日志（仅支持单个 IP）"
     echo "  reset    - 清除机器人检测和下载计数的持久化数据"
     echo "  clear-video-status - 清除配置中 video_ids 视频的上传和下载状态（从对应机器的配置文件读取 video_ids）"
+    echo "  list-incomplete - 列出服务器上未完成下载或上传的视频（默认显示10个，可通过 --limit 参数调整）"
     echo "  sync     - 同步远程服务器的 downloads 目录下的元数据文件（.description, .json, .srt）到本地，并收集网卡流量详细信息"
     echo "  organize - 整理 output 目录：生成流量汇总统计，整理字幕文件夹到归档目录"
     echo "  subtitle - 在远程服务器上后台执行 subtitle 命令（如果已在执行则跳过）"
@@ -79,10 +80,11 @@ fi
 # 初始化选项变量（在循环之前，这样循环中可以设置它们）
 INIT_AFTER_INSTALL=false
 SKIP_COOKIES=false
+LIST_INCOMPLETE_LIMIT=10
 ACTIONS=()
 while [ $# -gt 0 ]; do
     case $1 in
-        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize|subtitle|clear-video-status)
+        prepare|install|uninstall|start|stop|restart|status|enable|disable|logs|reset|sync|organize|subtitle|clear-video-status|list-incomplete)
             ACTIONS+=("$1")
             shift
             ;;
@@ -217,7 +219,7 @@ while [ $# -gt 0 ]; do
             # 检查是否是选项（以 -- 开头），如果是则报错（应该在前面处理）
             if [[ $1 == --* ]]; then
                 log_error "未知选项: $1"
-                log_error "支持的选项: --init, --skip-cookies"
+                log_error "支持的选项: --init, --skip-cookies, --limit N"
                 exit 1
             fi
             # 解析 IP（支持逗号分隔或单个 IP）
@@ -545,6 +547,192 @@ logs_service_for_ip() {
             remote_exec "tail -f /var/log/blueberry/download.log /var/log/blueberry/download.error.log /var/log/blueberry/upload.log /var/log/blueberry/upload.error.log"
             ;;
     esac
+}
+
+# 列出未完成下载或上传的视频（针对单个 IP）
+list_incomplete_videos_for_ip() {
+    local ip=$1
+    local limit=${LIST_INCOMPLETE_LIMIT:-10}
+    setup_ssh_for_ip "$ip"
+    
+    log_ip "$ip" "查找未完成下载或上传的视频（限制: $limit 个）..."
+    
+    # 在远程服务器上执行 Python 脚本来查找未完成的视频
+    local list_script=$(cat <<'PYTHON_LIST_EOF'
+import json
+import os
+import sys
+
+limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+downloads_dir = "./downloads"
+
+if not os.path.exists(downloads_dir):
+    print(f"错误: downloads 目录不存在: {downloads_dir}", file=sys.stderr)
+    sys.exit(1)
+
+incomplete_videos = []
+
+# 遍历所有频道目录
+for channel_id in sorted(os.listdir(downloads_dir)):
+    channel_dir = os.path.join(downloads_dir, channel_id)
+    if not os.path.isdir(channel_dir) or channel_id.startswith('.'):
+        continue
+    
+    # 遍历该频道下的所有视频目录
+    for video_dir_name in sorted(os.listdir(channel_dir)):
+        video_dir = os.path.join(channel_dir, video_dir_name)
+        if not os.path.isdir(video_dir):
+            continue
+        
+        video_info_file = os.path.join(video_dir, "video_info.json")
+        if not os.path.exists(video_info_file):
+            continue
+        
+        # 读取视频信息
+        try:
+            with open(video_info_file, 'r', encoding='utf-8') as f:
+                video_info = json.load(f)
+            video_id = video_info.get('id', '')
+            video_title = video_info.get('title', video_dir_name)
+        except Exception:
+            continue
+        
+        # 检查下载状态
+        download_status_file = os.path.join(video_dir, "download_status.json")
+        is_downloaded = False
+        download_status = "unknown"
+        download_error = ""
+        
+        if os.path.exists(download_status_file):
+            try:
+                with open(download_status_file, 'r', encoding='utf-8') as f:
+                    status = json.load(f)
+                if 'video' in status:
+                    video_status = status['video']
+                    if isinstance(video_status, dict):
+                        is_downloaded = video_status.get('downloaded', False)
+                        download_status = video_status.get('status', 'unknown')
+                        download_error = video_status.get('error', '')
+                    elif isinstance(video_status, bool):
+                        is_downloaded = video_status
+                        download_status = "completed" if is_downloaded else "unknown"
+            except Exception:
+                pass
+        
+        # 检查是否有临时文件（说明还在下载中）
+        has_temp_files = False
+        temp_files = []
+        if os.path.isdir(video_dir):
+            for file_name in os.listdir(video_dir):
+                if '.part' in file_name or '.temp' in file_name or file_name.endswith('.temp'):
+                    has_temp_files = True
+                    temp_files.append(file_name)
+        
+        # 如果检测到临时文件，认为未下载完成
+        if has_temp_files:
+            is_downloaded = False
+        
+        # 检查上传状态
+        upload_status_file = os.path.join(video_dir, "upload_status.json")
+        is_uploaded = False
+        upload_status = "unknown"
+        upload_error = ""
+        bilibili_aid = ""
+        
+        if os.path.exists(upload_status_file):
+            try:
+                with open(upload_status_file, 'r', encoding='utf-8') as f:
+                    upload_data = json.load(f)
+                if 'status' in upload_data:
+                    upload_status = upload_data['status']
+                    is_uploaded = (upload_status == 'completed')
+                elif 'uploaded' in upload_data:
+                    is_uploaded = upload_data.get('uploaded', False)
+                    upload_status = "completed" if is_uploaded else "unknown"
+                upload_error = upload_data.get('error', '')
+                bilibili_aid = upload_data.get('bilibili_aid', '')
+            except Exception:
+                pass
+        
+        # 如果未下载完成或未上传完成，添加到列表
+        if not is_downloaded or not is_uploaded:
+            incomplete_videos.append({
+                'channel_id': channel_id,
+                'video_id': video_id,
+                'title': video_title,
+                'video_dir': video_dir_name,
+                'downloaded': is_downloaded,
+                'download_status': download_status,
+                'download_error': download_error,
+                'uploaded': is_uploaded,
+                'upload_status': upload_status,
+                'upload_error': upload_error,
+                'bilibili_aid': bilibili_aid,
+                'has_temp_files': has_temp_files,
+                'temp_files': temp_files[:3]  # 只显示前3个临时文件
+            })
+        
+        # 如果已经找到足够的视频，停止搜索（需要跳出两层循环）
+        if len(incomplete_videos) >= limit:
+            break
+    
+    # 如果已经找到足够的视频，停止搜索外层循环
+    if len(incomplete_videos) >= limit:
+        break
+
+# 在所有循环结束后检查结果
+if not incomplete_videos:
+    print("未找到未完成的视频")
+    sys.exit(0)
+    
+    # 输出结果
+    print(f"\n找到 {len(incomplete_videos)} 个未完成的视频（显示前 {min(len(incomplete_videos), limit)} 个）:\n")
+    print(f"{'序号':<4} {'频道ID':<20} {'Video ID':<15} {'下载':<6} {'上传':<6} {'标题'}")
+    print("-" * 120)
+    
+    for idx, video in enumerate(incomplete_videos[:limit], 1):
+        downloaded_str = "✓" if video['downloaded'] else "✗"
+        uploaded_str = "✓" if video['uploaded'] else "✗"
+        title_short = video['title'][:50] if len(video['title']) > 50 else video['title']
+        
+        print(f"{idx:<4} {video['channel_id']:<20} {video['video_id']:<15} {downloaded_str:<6} {uploaded_str:<6} {title_short}")
+        
+        # 显示详细信息
+        details = []
+        if not video['downloaded']:
+            status_info = f"下载状态: {video['download_status']}"
+            if video['download_error']:
+                status_info += f" (错误: {video['download_error'][:50]})"
+            if video['has_temp_files']:
+                status_info += f" [临时文件: {', '.join(video['temp_files'])}]"
+            details.append(status_info)
+        if not video['uploaded']:
+            status_info = f"上传状态: {video['upload_status']}"
+            if video['upload_error']:
+                status_info += f" (错误: {video['upload_error'][:50]})"
+            details.append(status_info)
+        if video['bilibili_aid']:
+            details.append(f"AID: {video['bilibili_aid']}")
+        
+        if details:
+            for detail in details:
+                print(f"      {detail}")
+    
+    if len(incomplete_videos) > limit:
+        print(f"\n... 还有 {len(incomplete_videos) - limit} 个未完成的视频未显示")
+PYTHON_LIST_EOF
+)
+    
+    # 将 Python 脚本传输到远程服务器并执行
+    local temp_python_script="/tmp/list_incomplete_${ip}_$$.py"
+    echo "$list_script" | remote_exec "cat > $temp_python_script && cd $REMOTE_DIR && python3 $temp_python_script $limit && rm -f $temp_python_script"
+    
+    if [ $? -ne 0 ]; then
+        log_error "[$ip] 查找未完成视频失败"
+        return 1
+    fi
+    
+    return 0
 }
 
 # 清除配置中 video_ids 视频的上传和下载状态（针对单个 IP）
@@ -2084,6 +2272,10 @@ process_all_ips() {
                     ((fail_count++))
                     failed_ips+=("$ip")
                 fi
+                ;;
+            list-incomplete)
+                list_incomplete_videos_for_ip "$ip"
+                ((success_count++))
                 ;;
             sync)
                 # sync 操作包括：同步 downloads 元数据文件 + 收集网卡流量详细信息 + 收集下载统计信息
