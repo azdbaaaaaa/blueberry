@@ -128,6 +128,8 @@ var organizeCmd = &cobra.Command{
 		skippedNotUploaded := 0      // 还没有上传成功的
 		totalScanned := 0            // 总共扫描的视频目录数量
 		copiedCount := 0
+		processedVideoCount := 0     // 已处理的视频数量（用于分组）
+		const videosPerSubdir = 5000 // 每个字幕子目录包含的视频数量
 
 		// 频道统计信息
 		type ChannelStats struct {
@@ -215,15 +217,36 @@ var organizeCmd = &cobra.Command{
 					globalStats.TotalDownloadedVideos++
 				}
 
-				// 统计字幕数量
-				subtitleFilesForStats, err := fileRepo.FindSubtitleFiles(videoDir)
-				if err == nil {
-					channelStats.TotalSubtitles += len(subtitleFilesForStats)
-					globalStats.TotalSubtitles += len(subtitleFilesForStats)
-					// 如果已上传且有字幕，统计 uploaded_with_subtitles
-					if isUploaded && len(subtitleFilesForStats) > 0 {
-						channelStats.UploadedWithSubtitles++
-						globalStats.TotalUploadedWithSubtitles++
+				// 统计字幕数量（只统计已上传视频的新格式字幕文件）
+				// 注意：这里只统计已上传的视频，未上传的视频不统计
+				// 只统计新格式字幕：title[video_id].lang.ext
+				if isUploaded {
+					// 读取 video_info.json 获取 video_id
+					videoInfo, err := fileRepo.LoadVideoInfo(videoDir)
+					if err == nil && videoInfo.ID != "" {
+						// 查找所有字幕文件
+						subtitleFilesForStats, err := fileRepo.FindSubtitleFiles(videoDir)
+						if err == nil && len(subtitleFilesForStats) > 0 {
+							// 只统计新格式的字幕文件
+							escapedVideoID := regexp.QuoteMeta(videoInfo.ID)
+							newFormatPattern := regexp.MustCompile(fmt.Sprintf(`.*\[%s\]\.([a-zA-Z-]+)\.(srt|vtt)$`, escapedVideoID))
+
+							newFormatCount := 0
+							for _, subtitleFile := range subtitleFilesForStats {
+								subtitleBase := filepath.Base(subtitleFile)
+								if matches := newFormatPattern.FindStringSubmatch(subtitleBase); len(matches) > 0 {
+									newFormatCount++
+								}
+							}
+
+							if newFormatCount > 0 {
+								channelStats.TotalSubtitles += newFormatCount
+								globalStats.TotalSubtitles += newFormatCount
+								// 如果已上传且有字幕，统计 uploaded_with_subtitles
+								channelStats.UploadedWithSubtitles++
+								globalStats.TotalUploadedWithSubtitles++
+							}
+						}
 					}
 				}
 
@@ -241,35 +264,13 @@ var organizeCmd = &cobra.Command{
 				}
 
 				// 检查上传状态（force 模式下跳过）
-				var aid string
 				if !organizeForce {
-					uploadStatusFile := filepath.Join(videoDir, "upload_status.json")
 					if !fileRepo.IsVideoUploaded(videoDir) {
 						skippedNotUploaded++
 						continue
 					}
-
-					// 读取 upload_status.json 获取 aid
-					var uploadStatus map[string]interface{}
-					uploadStatusData, err := os.ReadFile(uploadStatusFile)
-					if err != nil {
-						logger.Warn().Err(err).Str("video_dir", videoDir).Msg("读取 upload_status.json 失败，跳过")
-						continue
-					}
-					if err := json.Unmarshal(uploadStatusData, &uploadStatus); err != nil {
-						logger.Warn().Err(err).Str("video_dir", videoDir).Msg("解析 upload_status.json 失败，跳过")
-						continue
-					}
-
-					if aidVal, ok := uploadStatus["bilibili_aid"]; ok {
-						if aidStr, ok := aidVal.(string); ok {
-							aid = aidStr
-						} else if aidNum, ok := aidVal.(float64); ok {
-							aid = fmt.Sprintf("%.0f", aidNum)
-						}
-					}
 				} else {
-					// Force 模式：跳过上传状态检查，不使用 aid
+					// Force 模式：跳过上传状态检查
 					logger.Debug().Str("video_dir", videoDir).Msg("Force 模式：跳过上传状态检查")
 				}
 
@@ -295,6 +296,7 @@ var organizeCmd = &cobra.Command{
 					// 没有字幕文件，标记为已处理
 					if err := os.WriteFile(organizeMarker, []byte(""), 0644); err == nil {
 						processedCount++
+						processedVideoCount++ // 增加已处理的视频计数（用于分组）
 					}
 					continue
 				}
@@ -338,17 +340,21 @@ var organizeCmd = &cobra.Command{
 					}
 				}
 
-				// 创建字幕目录
-				aidSubtitlesDir := subtitlesDir
-				if !organizeForce && aid != "" {
-					// 非 force 模式且 aid 不为空，使用 subtitles/{aid}/ 目录
-					aidSubtitlesDir = filepath.Join(subtitlesDir, aid)
-					if err := os.MkdirAll(aidSubtitlesDir, 0755); err != nil {
-						logger.Warn().Err(err).Str("aid", aid).Str("dir", aidSubtitlesDir).Msg("创建 aid 字幕目录失败，使用默认目录")
-						aidSubtitlesDir = subtitlesDir
+				// 创建字幕目录（每 5000 个视频放在一个子目录中）
+				// 计算当前视频应该放在哪个子目录（subtitle1, subtitle2, ...）
+				subdirIndex := (processedVideoCount / videosPerSubdir) + 1
+				subdirName := fmt.Sprintf("subtitle%d", subdirIndex)
+				currentSubtitlesDir := filepath.Join(subtitlesDir, subdirName)
+
+				videoIDSubtitlesDir := currentSubtitlesDir
+				if videoID != "" {
+					// 使用 subtitles/subtitle{N}/{video_id}/ 目录
+					videoIDSubtitlesDir = filepath.Join(currentSubtitlesDir, videoID)
+					if err := os.MkdirAll(videoIDSubtitlesDir, 0755); err != nil {
+						logger.Warn().Err(err).Str("video_id", videoID).Str("dir", videoIDSubtitlesDir).Msg("创建 video_id 字幕目录失败，使用默认目录")
+						videoIDSubtitlesDir = currentSubtitlesDir
 					}
 				}
-				// Force 模式或 aid 为空，直接使用 subtitlesDir（不创建 aid 子目录）
 
 				// 处理每个语言的字幕
 				for lang, files := range subtitleByLang {
@@ -417,13 +423,13 @@ var organizeCmd = &cobra.Command{
 						}
 					}
 
-					// 复制到 subtitles/{aid}/ 目录（使用新格式命名）
+					// 复制到 subtitles/{video_id}/ 目录（使用新格式命名）
 					if subtitleFile != "" {
 						truncatedTitle := fileRepo.TruncateTitleForFilename(sanitizedTitle, videoID, lang, subtitleExt)
 						destSubtitle := fmt.Sprintf("%s[%s].%s.%s", truncatedTitle, videoID, lang, subtitleExt)
 						// 清理文件名中的非法字符
 						destSubtitle = sanitizeFilename(destSubtitle)
-						destPath := filepath.Join(aidSubtitlesDir, destSubtitle)
+						destPath := filepath.Join(videoIDSubtitlesDir, destSubtitle)
 
 						// 读取源文件
 						data, err := os.ReadFile(subtitleFile)
@@ -440,7 +446,6 @@ var organizeCmd = &cobra.Command{
 									logger.Info().
 										Str("lang", lang).
 										Str("dest", destPath).
-										Str("aid", aid).
 										Str("video_id", videoID).
 										Msg("已复制字幕文件")
 								}
@@ -456,6 +461,7 @@ var organizeCmd = &cobra.Command{
 				// 标记为已处理
 				if err := os.WriteFile(organizeMarker, []byte(""), 0644); err == nil {
 					processedCount++
+					processedVideoCount++ // 增加已处理的视频计数（用于分组）
 				}
 			}
 
@@ -661,7 +667,7 @@ func generateNetworkStatsSummary(detailFile, dateStr, projectRoot string) error 
 }
 
 func init() {
-	organizeCmd.Flags().BoolVar(&organizeForce, "force", false, "强制模式：无视 .organized 标记文件，不看上传状态，不使用 aid 子目录，直接将所有新格式字幕文件放在 subtitles 目录下")
+	organizeCmd.Flags().BoolVar(&organizeForce, "force", false, "强制模式：无视 .organized 标记文件，不看上传状态，直接将所有新格式字幕文件放在 subtitles/{video_id} 目录下")
 	organizeCmd.Flags().StringVar(&organizeDateStr, "date", "", "指定归档目录的日期（格式：YYYYMMDD，例如：20251228），默认为当前日期")
 	rootCmd.AddCommand(organizeCmd)
 }
