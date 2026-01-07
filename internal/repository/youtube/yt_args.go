@@ -68,12 +68,19 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		"--skip-unavailable-fragments",
 		"--sleep-interval", strconv.Itoa(sleepIntervalWithRandom),
 		"--concurrent-fragments", strconv.Itoa(concurrentFragments),
-		"--sleep-requests", strconv.Itoa(sleepRequests),
-		"--sleep-subtitles", strconv.Itoa(sleepSubtitles),
+	}
+	// 只有当值大于 0 时才添加 sleep 参数（0 表示不 sleep）
+	if sleepRequests > 0 {
+		args = append(args, "--sleep-requests", strconv.Itoa(sleepRequests))
+	}
+	if sleepSubtitles > 0 {
+		args = append(args, "--sleep-subtitles", strconv.Itoa(sleepSubtitles))
+	}
+	args = append(args,
 		"--buffer-size", bufferSize,
 		"--file-access-retries", strconv.Itoa(fileAccessRetries),
 		"--socket-timeout", strconv.Itoa(socketTimeout),
-	}
+	)
 	// 添加限速参数（如果配置了）
 	if cfg != nil && cfg.YouTube.LimitRate != "" {
 		args = append(args, "--limit-rate", cfg.YouTube.LimitRate)

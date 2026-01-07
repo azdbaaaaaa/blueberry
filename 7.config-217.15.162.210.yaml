@@ -4,7 +4,8 @@ youtube:
   concurrent_fragments: 2  # 并发下载片段数，提高下载速度
   sleep_interval_seconds: 30  # 睡眠间隔时间（秒）
   video_limit_rest_duration: 120  # 休息时长（分钟），默认1小时，实际休息时间会在此基础上随机增加 0-10%
-  
+  sleep_requests_seconds: 0
+  sleep_subtitles_seconds: 0  
 youtube_channels:
   - url: "https://www.youtube.com/@%E6%9B%BC%E6%B3%A2%E5%8B%95%E6%BC%AB/videos"
   - url: "https://www.youtube.com/@Comic-likerhythm/videos"
