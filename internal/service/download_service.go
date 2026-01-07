@@ -96,10 +96,10 @@ func NewDownloadService(
 }
 
 // getDefaultSubtitleLanguages 获取默认字幕语言列表
-// 固定返回所有渠道都使用的字幕语言：en, id, ms, th, vn, zh-Hans, zh-Hant
+// 固定返回所有渠道都使用的字幕语言：en, id, ms, th, vn, zh, zh-Hans, zh-Hant
 func (s *downloadService) getDefaultSubtitleLanguages() []string {
 	// 固定使用这些语言，不再从配置文件读取
-	return []string{"en", "id", "ms", "th", "vn", "zh-Hans", "zh-Hant"}
+	return []string{"en", "id", "ms", "th", "vn", "zh", "zh-Hans", "zh-Hant"}
 }
 
 // getChannelLanguages 获取指定频道配置的字幕语言列表
