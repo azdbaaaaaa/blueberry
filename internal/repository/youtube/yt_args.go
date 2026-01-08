@@ -2,12 +2,10 @@ package youtube
 
 import (
 	"fmt"
-	"math/rand"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"blueberry/internal/config"
 )
@@ -21,9 +19,9 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	retries := 3
 	fragmentRetries := 3
 	concurrentFragments := 1 // 默认值 1（与 config.go 中的默认值保持一致）
-	sleepInterval := 30      // 默认值 30 秒（与 config.go 中的默认值保持一致）
-	sleepRequests := 3
-	sleepSubtitles := 2
+	// sleepInterval := 30      // 默认值 30 秒（与 config.go 中的默认值保持一致）
+	// sleepRequests := 3
+	// sleepSubtitles := 2
 	bufferSize := "1M"
 	fileAccessRetries := 5
 	socketTimeout := 30 // 默认30秒网络连接超时
@@ -37,15 +35,15 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 		if cfg.YouTube.ConcurrentFragments > 0 {
 			concurrentFragments = cfg.YouTube.ConcurrentFragments
 		}
-		if cfg.YouTube.SleepIntervalSeconds > 0 {
-			sleepInterval = cfg.YouTube.SleepIntervalSeconds
-		}
-		if cfg.YouTube.SleepRequestsSeconds > 0 {
-			sleepRequests = cfg.YouTube.SleepRequestsSeconds
-		}
-		if cfg.YouTube.SleepSubtitlesSeconds > 0 {
-			sleepSubtitles = cfg.YouTube.SleepSubtitlesSeconds
-		}
+		// if cfg.YouTube.SleepIntervalSeconds > 0 {
+		// 	sleepInterval = cfg.YouTube.SleepIntervalSeconds
+		// }
+		// if cfg.YouTube.SleepRequestsSeconds > 0 {
+		// 	sleepRequests = cfg.YouTube.SleepRequestsSeconds
+		// }
+		// if cfg.YouTube.SleepSubtitlesSeconds > 0 {
+		// 	sleepSubtitles = cfg.YouTube.SleepSubtitlesSeconds
+		// }
 		if cfg.YouTube.BufferSize != "" {
 			bufferSize = cfg.YouTube.BufferSize
 		}
@@ -58,24 +56,24 @@ func BuildYtDlpStabilityArgs(cfg *config.Config) []string {
 	}
 	// 为 sleep interval 添加 0%-50% 的随机变化
 	// 使用当前时间作为随机种子，确保每次调用都有不同的随机值
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomFactor := 1.0 + rng.Float64()*0.5 // 1.0 到 1.5 之间的随机值
-	sleepIntervalWithRandom := int(float64(sleepInterval) * randomFactor)
+	// rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// randomFactor := 1.0 + rng.Float64()*0.5 // 1.0 到 1.5 之间的随机值
+	// sleepIntervalWithRandom := int(float64(sleepInterval) * randomFactor)
 
 	args := []string{
 		"--retries", strconv.Itoa(retries),
 		"--fragment-retries", strconv.Itoa(fragmentRetries),
 		"--skip-unavailable-fragments",
-		"--sleep-interval", strconv.Itoa(sleepIntervalWithRandom),
+		// "--sleep-interval", strconv.Itoa(sleepIntervalWithRandom),
 		"--concurrent-fragments", strconv.Itoa(concurrentFragments),
 	}
 	// 只有当值大于 0 时才添加 sleep 参数（0 表示不 sleep）
-	if sleepRequests > 0 {
-		args = append(args, "--sleep-requests", strconv.Itoa(sleepRequests))
-	}
-	if sleepSubtitles > 0 {
-		args = append(args, "--sleep-subtitles", strconv.Itoa(sleepSubtitles))
-	}
+	// if sleepRequests > 0 {
+	// 	args = append(args, "--sleep-requests", strconv.Itoa(sleepRequests))
+	// }
+	// if sleepSubtitles > 0 {
+	// 	args = append(args, "--sleep-subtitles", strconv.Itoa(sleepSubtitles))
+	// }
 	args = append(args,
 		"--buffer-size", bufferSize,
 		"--file-access-retries", strconv.Itoa(fileAccessRetries),
